@@ -47,6 +47,13 @@ class TestNormalizer(unittest.TestCase):
         self.assertEqual(res["day_change_pct"], 0.38)
         self.assertEqual(res["total_pnl_inr"], 1215190.50)
 
+    def test_normalize_with_markdown_fences_and_string_json(self):
+        fenced_str = "```json\n{\"total_networth\": 5000000, \"invested\": 4000000, \"day_change\": 25000, \"day_change_pct\": 0.5}\n```"
+        res = normalize_summary(fenced_str)
+        self.assertEqual(res["total_networth_inr"], 5000000.0)
+        self.assertEqual(res["invested_inr"], 4000000.0)
+        self.assertEqual(res["total_pnl_inr"], 1000000.0)
+
     def test_normalize_allocation(self):
         raw = [
             {"asset": "Indian Stocks", "value": 2100000, "day_pct": 0.62},

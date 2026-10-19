@@ -125,15 +125,30 @@ class IndMoneyMcpClient:
             "arguments": arguments or {}
         }
         result = self._send_rpc("tools/call", params)
+
+        # Check for structuredContent first (MCP spec)
+        if isinstance(result, dict) and "structuredContent" in result:
+            return result["structuredContent"]
+
         content = result.get("content", [])
 
         # MCP tools return an array of text/image content items
         if isinstance(content, list) and len(content) > 0:
             first = content[0]
             if isinstance(first, dict) and "text" in first:
-                text_val = first["text"]
+                text_val = str(first["text"]).strip()
+                # Strip markdown code fences if present (e.g. ```json ... ```)
+                if text_val.startswith("```"):
+                    lines = text_val.split("\n")
+                    if len(lines) >= 2 and lines[0].startswith("```"):
+                        lines = lines[1:]
+                    if lines and lines[-1].strip() == "```":
+                        lines = lines[:-1]
+                    text_val = "\n".join(lines).strip()
+
                 try:
                     return json.loads(text_val)
                 except (json.JSONDecodeError, TypeError):
                     return text_val
         return content
+

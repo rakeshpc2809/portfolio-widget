@@ -1,6 +1,7 @@
 """Data normalization engine converting raw IndMoney MCP payloads to normalized state.json."""
+import json
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .governor import get_market_state
 
@@ -32,8 +33,31 @@ def _safe_float(val: Any, default: float = 0.0) -> float:
         return default
 
 
+def _parse_json_if_str(val: Any) -> Any:
+    if isinstance(val, str):
+        val_str = val.strip()
+        if val_str.startswith("```"):
+            lines = val_str.split("\n")
+            if len(lines) >= 2 and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            val_str = "\n".join(lines).strip()
+        try:
+            return json.loads(val_str)
+        except Exception:
+            return val
+    return val
+
+
 def normalize_summary(raw_snapshot: Any) -> Dict[str, Any]:
-    if not isinstance(raw_snapshot, dict):
+    raw_snapshot = _parse_json_if_str(raw_snapshot)
+    if isinstance(raw_snapshot, dict):
+        if "data" in raw_snapshot and isinstance(raw_snapshot["data"], dict):
+            raw_snapshot = raw_snapshot["data"]
+        elif "snapshot" in raw_snapshot and isinstance(raw_snapshot["snapshot"], dict):
+            raw_snapshot = raw_snapshot["snapshot"]
+    else:
         raw_snapshot = {}
 
     # Extract or infer standard fields
@@ -89,13 +113,19 @@ def normalize_summary(raw_snapshot: Any) -> Dict[str, Any]:
 
 
 def normalize_allocation(raw_alloc: Any, total_networth: float) -> List[Dict[str, Any]]:
+    raw_alloc = _parse_json_if_str(raw_alloc)
     items: List[Dict[str, Any]] = []
 
     alloc_list = []
     if isinstance(raw_alloc, list):
         alloc_list = raw_alloc
     elif isinstance(raw_alloc, dict):
-        if "allocations" in raw_alloc and isinstance(raw_alloc["allocations"], list):
+        if "data" in raw_alloc and isinstance(raw_alloc["data"], (list, dict)):
+            raw_alloc = raw_alloc["data"]
+
+        if isinstance(raw_alloc, list):
+            alloc_list = raw_alloc
+        elif "allocations" in raw_alloc and isinstance(raw_alloc["allocations"], list):
             alloc_list = raw_alloc["allocations"]
         else:
             for k, v in raw_alloc.items():
@@ -129,11 +159,12 @@ def normalize_allocation(raw_alloc: Any, total_networth: float) -> List[Dict[str
 
 
 def normalize_holdings(raw_holdings: Any) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    raw_holdings = _parse_json_if_str(raw_holdings)
     holding_list = []
     if isinstance(raw_holdings, list):
         holding_list = raw_holdings
     elif isinstance(raw_holdings, dict):
-        holding_list = raw_holdings.get("holdings") or raw_holdings.get("data") or []
+        holding_list = raw_holdings.get("holdings") or raw_holdings.get("data") or raw_holdings.get("items") or []
 
     normalized_all: List[Dict[str, Any]] = []
 
@@ -182,10 +213,11 @@ def normalize_sips(raw_mf_sips: Any, raw_in_sips: Any, raw_us_sips: Any) -> Dict
     all_sips: List[Dict[str, Any]] = []
 
     def _collect(sips: Any, sip_type: str) -> None:
+        sips = _parse_json_if_str(sips)
         if isinstance(sips, list):
             items = sips
         elif isinstance(sips, dict):
-            items = sips.get("sips") or sips.get("data") or []
+            items = sips.get("sips") or sips.get("data") or sips.get("items") or []
         else:
             items = []
 
