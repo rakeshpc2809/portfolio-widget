@@ -1,0 +1,18 @@
+[Unit]
+Description=IndMoney Portfolio MCP Sync Worker
+After=graphical-session.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/indmoney-sync fetch
+PassEnvironment=DBUS_SESSION_BUS_ADDRESS WAYLAND_DISPLAY XDG_RUNTIME_DIR
+RuntimeDirectory=inir-indmoney
+RuntimeDirectoryPreserve=yes
+ReadWritePaths=%t/inir-indmoney %h/.cache/inir/indmoney
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=default.target

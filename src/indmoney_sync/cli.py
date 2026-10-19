@@ -1,0 +1,312 @@
+"""Command-line interface for IndMoney sync worker."""
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+from .auth import (
+    clear_tokens,
+    execute_browser_auth_flow,
+    is_token_expired,
+    load_tokens,
+    refresh_token
+)
+from .client import IndMoneyMcpClient
+from .governor import get_market_state, should_execute_fetch
+from .inspector import run_inspect
+from .mock_data import get_mock_state
+from .normalizer import build_normalized_state
+
+# File paths
+RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "inir-indmoney"
+STATE_FILE = RUNTIME_DIR / "state.json"
+STATE_TMP_FILE = RUNTIME_DIR / "state.json.tmp"
+
+CACHE_DIR = Path.home() / ".cache" / "inir" / "indmoney"
+LAST_GOOD_FILE = CACHE_DIR / "last_good.json"
+SIPS_CACHE_FILE = CACHE_DIR / "sips_cache.json"
+
+MCP_ENDPOINT = "https://mcp.indmoney.com/mcp"
+
+
+def ensure_dirs() -> None:
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def write_atomic_state(payload: Dict[str, Any]) -> None:
+    ensure_dirs()
+    # Write to tmp file first
+    with open(STATE_TMP_FILE, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    # Atomic replace
+    os.replace(STATE_TMP_FILE, STATE_FILE)
+
+    # Backup to persistent cache if status is ok
+    if payload.get("status") == "ok":
+        with open(LAST_GOOD_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
+
+def notify_user(title: str, message: str, urgency: str = "normal") -> None:
+    try:
+        subprocess.run(
+            ["notify-send", "-a", "IndMoney", "-u", urgency, title, message],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+    except Exception:
+        pass
+
+
+def get_cached_or_default_state() -> Dict[str, Any]:
+    if LAST_GOOD_FILE.exists():
+        try:
+            with open(LAST_GOOD_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return get_mock_state()
+
+
+def cmd_auth(args: argparse.Namespace) -> int:
+    print("[indmoney-sync] Starting OAuth 2.1 PKCE interactive authentication...")
+    try:
+        execute_browser_auth_flow()
+        print("[indmoney-sync] Auth completed successfully! Running initial fetch...")
+        return cmd_fetch(argparse.Namespace(force=True, verbose=True))
+    except Exception as e:
+        print(f"[indmoney-sync] Authentication failed: {e}", file=sys.stderr)
+        notify_user("IndMoney Login Failed", str(e), urgency="critical")
+        return 1
+
+
+def cmd_inspect(args: argparse.Namespace) -> int:
+    print("[indmoney-sync] Inspecting IndMoney MCP schemas...")
+    try:
+        run_inspect()
+        return 0
+    except Exception as e:
+        print(f"[indmoney-sync] Inspect failed: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_mock(args: argparse.Namespace) -> int:
+    print("[indmoney-sync] Writing mock portfolio data...")
+    state = get_mock_state()
+    write_atomic_state(state)
+    print(f"[indmoney-sync] Wrote mock state to {STATE_FILE}")
+    return 0
+
+
+def cmd_fetch(args: argparse.Namespace) -> int:
+    ensure_dirs()
+    force = getattr(args, "force", False)
+    verbose = getattr(args, "verbose", False)
+
+    # Check last fetch timestamp
+    last_fetch_ts = 0.0
+    if LAST_GOOD_FILE.exists():
+        try:
+            last_fetch_ts = LAST_GOOD_FILE.stat().st_mtime
+        except Exception:
+            pass
+
+    should_run, reason, market_state = should_execute_fetch(last_fetch_ts, force=force)
+    if verbose:
+        print(f"[indmoney-sync] Governor check: should_run={should_run} ({reason}), market={market_state}")
+
+    if not should_run:
+        if verbose:
+            print("[indmoney-sync] Skipping fetch as cache is fresh and market is off-hours.")
+        return 0
+
+    tokens = load_tokens()
+    if not tokens:
+        print("[indmoney-sync] No tokens found in keyring. Auth required.")
+        state = get_cached_or_default_state()
+        state["status"] = "auth_required"
+        state["auth_error"] = "Please connect IndMoney"
+        write_atomic_state(state)
+        notify_user("IndMoney Session Required", "Please connect your IndMoney account from the widget.", urgency="critical")
+        return 2
+
+    # Refresh token if needed
+    if is_token_expired(tokens):
+        if verbose:
+            print("[indmoney-sync] Token expired or expiring soon, refreshing...")
+        refreshed = refresh_token(tokens)
+        if not refreshed:
+            print("[indmoney-sync] Token refresh failed with invalid_grant.")
+            clear_tokens()
+            state = get_cached_or_default_state()
+            state["status"] = "auth_required"
+            state["auth_error"] = "Session expired, please re-authenticate"
+            write_atomic_state(state)
+            notify_user("IndMoney Session Expired", "Please re-authenticate your IndMoney account.", urgency="critical")
+            return 2
+        tokens = refreshed
+
+    access_token = tokens["access_token"]
+
+    try:
+        with IndMoneyMcpClient(MCP_ENDPOINT, access_token) as client:
+            client.initialize()
+
+            # Fast tier tools
+            if verbose:
+                print("[indmoney-sync] Fetching networth_snapshot...")
+            snapshot = client.call_tool("networth_snapshot")
+
+            if verbose:
+                print("[indmoney-sync] Fetching networth_allocation_breakdown...")
+            allocation = client.call_tool("networth_allocation_breakdown")
+
+            if verbose:
+                print("[indmoney-sync] Fetching networth_holdings...")
+            holdings = client.call_tool("networth_holdings")
+
+            # Slow tier tools (SIPs) - cache for 6 hours
+            now = time.time()
+            sips_cached = None
+            if SIPS_CACHE_FILE.exists():
+                try:
+                    if now - SIPS_CACHE_FILE.stat().st_mtime < 6 * 3600:
+                        with open(SIPS_CACHE_FILE, "r", encoding="utf-8") as f:
+                            sips_cached = json.load(f)
+                except Exception:
+                    pass
+
+            if not sips_cached or force:
+                if verbose:
+                    print("[indmoney-sync] Fetching SIPs (slow tier)...")
+                try:
+                    mf_sips = client.call_tool("mf_sips")
+                except Exception:
+                    mf_sips = []
+                try:
+                    in_sips = client.call_tool("indian_stocks_sips")
+                except Exception:
+                    in_sips = []
+                try:
+                    us_sips = client.call_tool("us_stocks_sips")
+                except Exception:
+                    us_sips = []
+
+                sips_cached = {
+                    "mf": mf_sips,
+                    "in": in_sips,
+                    "us": us_sips
+                }
+                with open(SIPS_CACHE_FILE, "w", encoding="utf-8") as f:
+                    json.dump(sips_cached, f)
+
+            state = build_normalized_state(
+                snapshot=snapshot,
+                allocation=allocation,
+                holdings=holdings,
+                mf_sips=sips_cached.get("mf"),
+                in_sips=sips_cached.get("in"),
+                us_sips=sips_cached.get("us"),
+                status="ok"
+            )
+
+            write_atomic_state(state)
+            if verbose:
+                networth = state["summary"]["total_networth_inr"]
+                pnl = state["summary"]["total_pnl_inr"]
+                print(f"[indmoney-sync] Sync successful! Net worth: ₹{networth:,.2f} (P&L: ₹{pnl:,.2f})")
+            return 0
+
+    except PermissionError as e:
+        print(f"[indmoney-sync] Permission/Auth error: {e}")
+        state = get_cached_or_default_state()
+        state["status"] = "auth_required"
+        state["auth_error"] = str(e)
+        write_atomic_state(state)
+        notify_user("IndMoney Auth Error", str(e), urgency="critical")
+        return 2
+    except Exception as e:
+        print(f"[indmoney-sync] Fetch failed: {e}", file=sys.stderr)
+        state = get_cached_or_default_state()
+        state["status"] = "error"
+        state["auth_error"] = str(e)
+        write_atomic_state(state)
+        return 1
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    tokens = load_tokens()
+    has_token = tokens is not None
+    expired = is_token_expired(tokens) if tokens else True
+    market = get_market_state()
+
+    print("=== IndMoney Sync Status ===")
+    print(f"Keyring Service: inir-indmoney-mcp")
+    print(f"Authenticated:   {'YES' if has_token else 'NO'}")
+    if has_token:
+        exp_in = int((tokens.get("expires_at", 0) - time.time()) / 60)
+        print(f"Token Expiry:    in {exp_in} minutes ({'EXPIRED' if expired else 'VALID'})")
+        print(f"Client ID:       {tokens.get('client_id')}")
+    print(f"Market Window:   {market}")
+    print(f"State File:      {STATE_FILE} ({'EXISTS' if STATE_FILE.exists() else 'MISSING'})")
+    print(f"Cache File:      {LAST_GOOD_FILE} ({'EXISTS' if LAST_GOOD_FILE.exists() else 'MISSING'})")
+
+    if STATE_FILE.exists():
+        try:
+            with open(STATE_FILE, "r") as f:
+                data = json.load(f)
+            s = data.get("summary", {})
+            print(f"Current Networth: ₹{s.get('total_networth_inr', 0):,.2f}")
+            print(f"1D Change:        ₹{s.get('day_change_inr', 0):,.2f} ({s.get('day_change_pct', 0)}%)")
+            print(f"Status:           {data.get('status')}")
+        except Exception as e:
+            print(f"Error reading state file: {e}")
+
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="IndMoney MCP Sync CLI for iNiR / iRiS")
+    subparsers = parser.add_subparsers(dest="command")
+
+    # auth
+    subparsers.add_parser("auth", help="Interactive OAuth 2.1 PKCE authorization")
+
+    # inspect
+    subparsers.add_parser("inspect", help="Inspect and sample MCP tool schemas")
+
+    # fetch
+    fetch_parser = subparsers.add_parser("fetch", help="Headless sync worker")
+    fetch_parser.add_argument("--force", action="store_true", help="Bypass governor and force refresh")
+    fetch_parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
+
+    # mock
+    subparsers.add_parser("mock", help="Write realistic mock state for testing")
+
+    # status
+    subparsers.add_parser("status", help="Show current sync and token status")
+
+    args = parser.parse_args()
+
+    if args.command == "auth":
+        return cmd_auth(args)
+    elif args.command == "inspect":
+        return cmd_inspect(args)
+    elif args.command == "fetch":
+        return cmd_fetch(args)
+    elif args.command == "mock":
+        return cmd_mock(args)
+    elif args.command == "status":
+        return cmd_status(args)
+    else:
+        parser.print_help()
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
