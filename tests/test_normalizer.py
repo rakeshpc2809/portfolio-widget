@@ -147,5 +147,27 @@ class TestNormalizer(unittest.TestCase):
         self.assertEqual(state["sparkline"][-1]["v"], 1000000.0)
 
 
+    def test_build_normalized_state_unchanged_streak(self):
+        from unittest.mock import patch
+        raw = {"total_networth": 1000000.0, "invested": 800000.0, "day_change": 5000.0, "day_change_pct": 0.5}
+        prev_state = {
+            "unchanged_streak": 1,
+            "summary": {"total_networth_inr": 1000000.0, "day_change_inr": 5000.0}
+        }
+
+        with patch("indmoney_sync.normalizer.get_nominal_market_state", return_value="IN_OPEN"):
+            # Same values during IN_OPEN -> increment streak from 1 to 2
+            state = build_normalized_state(snapshot=raw, allocation=[], holdings=[], prev_state=prev_state)
+            self.assertEqual(state["unchanged_streak"], 2)
+            self.assertEqual(state["market_state"], "CLOSED")  # Auto-throttled because streak >= 2
+
+            # Value changed -> streak resets to 0
+            raw_changed = {"total_networth": 1001000.0, "invested": 800000.0, "day_change": 6000.0, "day_change_pct": 0.6}
+            state_changed = build_normalized_state(snapshot=raw_changed, allocation=[], holdings=[], prev_state=state)
+            self.assertEqual(state_changed["unchanged_streak"], 0)
+            self.assertEqual(state_changed["market_state"], "IN_OPEN")
+
+
 if __name__ == "__main__":
     unittest.main()
+

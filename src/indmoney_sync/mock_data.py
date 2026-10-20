@@ -25,6 +25,7 @@ def get_mock_state() -> dict[str, Any]:
         "status": "ok",
         "updated_at": now,
         "market_state": "IN_OPEN",
+        "unchanged_streak": 0,
         "auth_error": None,
         "summary": {
             "total_portfolio_inr": 4825190.50,

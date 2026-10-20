@@ -4,7 +4,7 @@ import json
 import time
 from typing import Any
 
-from .governor import get_market_state
+from .governor import get_market_state, get_nominal_market_state
 
 ASSET_COLORS = {
     "Equity": "#38bdf8",         # Sky
@@ -448,6 +448,7 @@ def build_normalized_state(
     in_sips: Any = None,
     us_sips: Any = None,
     prev_sparkline: list[dict[str, Any]] | None = None,
+    prev_state: dict[str, Any] | None = None,
     status: str = "ok",
     auth_error: str | None = None
 ) -> dict[str, Any]:
@@ -468,6 +469,9 @@ def build_normalized_state(
     )
 
     updated_at = int(time.time())
+    if prev_sparkline is None and isinstance(prev_state, dict):
+        prev_sparkline = prev_state.get("sparkline")
+
     sparkline = update_sparkline(
         prev_sparkline=prev_sparkline,
         current_val=summary["total_networth_inr"],
@@ -475,10 +479,38 @@ def build_normalized_state(
         max_points=30
     )
 
+    # Track unchanged_streak
+    unchanged_streak = 0
+    if isinstance(prev_state, dict):
+        prev_streak = int(prev_state.get("unchanged_streak", 0))
+        prev_summary = prev_state.get("summary", {})
+        prev_networth = _safe_float(prev_summary.get("total_networth_inr"))
+        prev_day_change = _safe_float(prev_summary.get("day_change_inr"))
+
+        curr_networth = summary["total_networth_inr"]
+        curr_day_change = summary["day_change_inr"]
+
+        nominal_state = get_nominal_market_state()
+        if nominal_state in ("IN_OPEN", "US_OPEN"):
+            # If values are identical during active hours, increment streak
+            if abs(curr_networth - prev_networth) < 0.01 and abs(curr_day_change - prev_day_change) < 0.01:
+                unchanged_streak = prev_streak + 1
+            else:
+                unchanged_streak = 0
+        else:
+            # During off-hours, reset if values change, otherwise maintain
+            if abs(curr_networth - prev_networth) >= 0.01 or abs(curr_day_change - prev_day_change) >= 0.01:
+                unchanged_streak = 0
+            else:
+                unchanged_streak = prev_streak
+
+    market_state = get_market_state(unchanged_streak=unchanged_streak)
+
     return {
         "status": status,
         "updated_at": updated_at,
-        "market_state": get_market_state(),
+        "market_state": market_state,
+        "unchanged_streak": unchanged_streak,
         "auth_error": auth_error,
         "summary": summary,
         "allocation": alloc_items,

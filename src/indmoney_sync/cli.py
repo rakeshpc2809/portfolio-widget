@@ -18,7 +18,7 @@ from .auth import (
     save_cached_state_to_keyring,
 )
 from .client import IndMoneyMcpClient
-from .governor import get_market_state, should_execute_fetch
+from .governor import get_market_state, should_fetch
 from .inspector import run_inspect
 from .mock_data import get_mock_state
 from .normalizer import build_normalized_state
@@ -174,19 +174,18 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         if hydrated and verbose:
             print("[indmoney-sync] Cold boot detected: pre-hydrated state.json from secure keyring.")
 
-    # Check last fetch timestamp from tmpfs state or keyring cache
-    last_fetch_ts = 0.0
+    # Check last state for governor check and unchanged_streak tracking
+    prev_state = None
     if STATE_FILE.exists():
         try:
-            last_fetch_ts = STATE_FILE.stat().st_mtime
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                prev_state = json.load(f)
         except Exception:
             pass
-    else:
-        cached_check = load_cached_state_from_keyring()
-        if cached_check and "updated_at" in cached_check:
-            last_fetch_ts = float(cached_check["updated_at"])
+    if not prev_state:
+        prev_state = load_cached_state_from_keyring()
 
-    should_run, reason, market_state = should_execute_fetch(last_fetch_ts, force=force)
+    should_run, reason, market_state = should_fetch(state=prev_state, force=force)
     if verbose:
         print(f"[indmoney-sync] Governor check: should_run={should_run} ({reason}), market={market_state}")
 
@@ -310,6 +309,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
                 in_sips=sips_cached.get("in"),
                 us_sips=sips_cached.get("us"),
                 prev_sparkline=prev_sparkline,
+                prev_state=prev_state,
                 status="ok"
             )
 
