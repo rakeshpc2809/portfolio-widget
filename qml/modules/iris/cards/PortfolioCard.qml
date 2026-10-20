@@ -58,6 +58,22 @@ ColumnLayout {
     Layout.fillWidth: true
     focus: true
 
+    onVisibleChanged: {
+        if (visible) {
+            root.forceActiveFocus()
+        }
+    }
+
+    Component.onCompleted: {
+        if (visible) {
+            root.forceActiveFocus()
+        }
+    }
+
+    TapHandler {
+        onTapped: root.forceActiveFocus()
+    }
+
     // --- Keyboard-First Navigation ---
     Keys.onPressed: event => {
         if (event.key === Qt.Key_1) {

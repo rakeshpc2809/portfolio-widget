@@ -19,15 +19,15 @@ from indmoney_sync.governor import (
 
 class TestGovernor(unittest.TestCase):
     def test_indian_market_hours_normal_day(self):
-        # Wednesday, Oct 21, 2026 at 11:30 AM IST (Not a holiday) -> IN_OPEN
-        wed_1130 = datetime.datetime(2026, 10, 21, 11, 30, tzinfo=IST)
-        self.assertEqual(get_market_state(wed_1130), "IN_OPEN")
-        self.assertTrue(is_market_open(wed_1130))
+        # Tuesday, Oct 20, 2026 at 11:30 AM IST (Normal trading day) -> IN_OPEN
+        tue_1130 = datetime.datetime(2026, 10, 20, 11, 30, tzinfo=IST)
+        self.assertEqual(get_market_state(tue_1130), "IN_OPEN")
+        self.assertTrue(is_market_open(tue_1130))
 
     def test_indian_market_holiday_short_circuit(self):
-        # Tuesday, Oct 20, 2026 is Dussehra (NSE Holiday)
+        # Wednesday, Oct 21, 2026 is Dussehra (NSE Holiday)
         # Even at 11:30 AM IST, market must be CLOSED
-        dussehra_1130 = datetime.datetime(2026, 10, 20, 11, 30, tzinfo=IST)
+        dussehra_1130 = datetime.datetime(2026, 10, 21, 11, 30, tzinfo=IST)
         self.assertTrue(is_nse_holiday(dussehra_1130.date()))
         self.assertEqual(get_market_state(dussehra_1130), "CLOSED")
         self.assertFalse(is_market_open(dussehra_1130))
@@ -38,10 +38,10 @@ class TestGovernor(unittest.TestCase):
         self.assertEqual(get_market_state(republic_day), "CLOSED")
 
     def test_us_market_hours_normal_day(self):
-        # Wednesday, Oct 21, 2026 at 21:30 IST (9:30 PM) -> US_OPEN
-        wed_2130 = datetime.datetime(2026, 10, 21, 21, 30, tzinfo=IST)
-        self.assertEqual(get_market_state(wed_2130), "US_OPEN")
-        self.assertTrue(is_market_open(wed_2130))
+        # Tuesday, Oct 20, 2026 at 21:30 IST (9:30 PM) -> US_OPEN
+        tue_2130 = datetime.datetime(2026, 10, 20, 21, 30, tzinfo=IST)
+        self.assertEqual(get_market_state(tue_2130), "US_OPEN")
+        self.assertTrue(is_market_open(tue_2130))
 
     def test_us_market_holiday_short_circuit(self):
         # Thursday, Nov 26, 2026 is Thanksgiving Day (NYSE Holiday)

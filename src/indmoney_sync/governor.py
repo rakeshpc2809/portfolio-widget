@@ -16,7 +16,7 @@ NSE_HOLIDAYS_2026 = {
     datetime.date(2026, 5, 27),  # Bakri Id / Eid ul-Adha
     datetime.date(2026, 6, 26),  # Muharram
     datetime.date(2026, 10, 2),  # Mahatma Gandhi Jayanti
-    datetime.date(2026, 10, 20), # Dussehra
+    datetime.date(2026, 10, 21), # Dussehra
     datetime.date(2026, 11, 10), # Diwali Balipratipada
     datetime.date(2026, 11, 24), # Gurunanak Jayanti
     datetime.date(2026, 12, 25), # Christmas

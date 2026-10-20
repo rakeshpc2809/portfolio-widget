@@ -62,6 +62,29 @@ def clear_tokens() -> None:
         pass
 
 
+KEYRING_STATE_ACCOUNT = "last_good_state"
+
+
+def save_cached_state_to_keyring(state: dict[str, Any]) -> None:
+    """Stores the last successful state JSON securely in encrypted OS keyring."""
+    try:
+        raw = json.dumps(state)
+        keyring.set_password(SERVICE_NAME, KEYRING_STATE_ACCOUNT, raw)
+    except Exception as e:
+        print(f"[auth] Error saving cached state to keyring: {e}")
+
+
+def load_cached_state_from_keyring() -> dict[str, Any] | None:
+    """Retrieves the last cached state JSON securely from encrypted OS keyring."""
+    try:
+        raw = keyring.get_password(SERVICE_NAME, KEYRING_STATE_ACCOUNT)
+        if raw:
+            return json.loads(raw)
+    except Exception as e:
+        print(f"[auth] Error loading cached state from keyring: {e}")
+    return None
+
+
 def is_token_expired(tokens: dict[str, Any], buffer_sec: int = 60) -> bool:
     expires_at = tokens.get("expires_at", 0)
     return time.time() >= (expires_at - buffer_sec)

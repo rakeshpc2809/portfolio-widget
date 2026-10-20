@@ -11,7 +11,6 @@ Singleton {
 
     readonly property string runtimeDir: Quickshell.env("XDG_RUNTIME_DIR") || ("/run/user/" + SystemInfo.userId)
     readonly property string statePath: root.runtimeDir + "/inir-indmoney/state.json"
-    readonly property string cachePath: Directories.homePath + "/.cache/inir/indmoney/last_good.json"
     readonly property string syncBin: Directories.homePath + "/.local/bin/indmoney-sync"
 
     property bool ready: false
@@ -59,18 +58,10 @@ Singleton {
             root._applyState(stateWatcher.text())
         }
         onLoadFailed: error => {
-            // If runtime file does not exist yet, fallback to persistent cache
-            if (!root.ready) cacheFallback.reload()
-        }
-    }
-
-    FileView {
-        id: cacheFallback
-        path: root.cachePath
-        watchChanges: false
-        printErrors: false
-        onLoaded: {
-            if (!root.ready) root._applyState(cacheFallback.text())
+            // Cold-boot: if state.json does not exist in tmpfs, trigger immediate hydration from encrypted keyring
+            if (!root.ready) {
+                Quickshell.execDetached([root.syncBin, "hydrate"])
+            }
         }
     }
 
@@ -179,5 +170,9 @@ Singleton {
 
     Component.onCompleted: {
         stateWatcher.reload()
+        // If state is not loaded immediately at millisecond 0, request instant hydration
+        if (!root.ready) {
+            Quickshell.execDetached([root.syncBin, "hydrate"])
+        }
     }
 }

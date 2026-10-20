@@ -2,9 +2,9 @@
 Description=IndMoney Portfolio MCP Sync Worker
 After=graphical-session.target network-online.target
 Wants=network-online.target
-
 [Service]
 Type=oneshot
+ExecStartPre=-%h/.local/bin/indmoney-sync hydrate
 ExecStart=%h/.local/bin/indmoney-sync fetch
 PassEnvironment=DBUS_SESSION_BUS_ADDRESS WAYLAND_DISPLAY XDG_RUNTIME_DIR
 RuntimeDirectory=inir-indmoney

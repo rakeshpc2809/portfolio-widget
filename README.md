@@ -15,14 +15,14 @@ A real-time, privacy-first portfolio widget built natively for **snowarch/iNiR**
 ┌────────────────────────────────────────────────────────────────────────┐
 │ 1. DATA PLANE (Python CLI + systemd user timer / worker)               │
 │                                                                        │
-│  [libsecret / OS Keyring] <──(OAuth 2.1 PKCE)──> [indmoney-sync]       │
+│  [libsecret / OS Keyring] <──(OAuth 2.1 PKCE + State Cache)──> [indmoney-sync]
 │                                                        │               │
 │  https://mcp.indmoney.com/mcp <──(Streamable HTTP)─────┘               │
 │   ├── Fast Tier (15m): networth_snapshot, breakdown, holdings          │
 │   └── Slow Tier (6h):  mf_sips, indian_stocks_sips, us_stocks_sips     │
 │                                                        │               │
 │  Atomic tmpfs write (tempfile -> os.replace)           ▼               │
-│  /run/user/$UID/inir-indmoney/state.json (& ~/.cache/.../last_good.json)│
+│  /run/user/$UID/inir-indmoney/state.json (100% RAM, zero disk leaks)   │
 └───────────────────────────────────┬────────────────────────────────────┘
                                     │ inotify / FileView (non-blocking)
                                     ▼
@@ -142,10 +142,10 @@ This opens your default web browser for secure login (Mobile + OTP + MPIN). Upon
 
 ## Privacy & Security Model
 
-This project was built from the ground up to prevent data leakage:
 - **No Hardcoded Credentials:** No credentials or API secrets are stored in the codebase or git history.
-- **Volatile Storage for Financial Balances:** Active portfolio state resides in tmpfs (`/run/user/$UID/inir-indmoney/state.json`) which is cleared on logout or shutdown.
-- **Secure Keyring:** Refresh tokens and client secrets are stored in `libsecret` (GNOME Keyring / KWallet).
+- **100% Volatile RAM Storage for Financial Balances:** Active portfolio state resides exclusively in tmpfs (`/run/user/$UID/inir-indmoney/state.json`) which is destroyed on logout or shutdown. Zero plaintext balance files are saved to `~/.cache` or persistent disk.
+- **Secure Encrypted Keyring:** OAuth 2.1 tokens and the persistent cold-boot state cache are stored strictly as encrypted secrets in `libsecret` (GNOME Keyring / KWallet).
+- **Instant Cold-Boot Hydration:** Quickshell triggers `indmoney-sync hydrate` on boot to reconstitute state into RAM tmpfs at millisecond 0 without waiting for scheduled timers.
 - **Auditable & Offline Testing:** Fully functional offline mode via `indmoney-sync mock` without requiring network access or personal data.
 
 ---
