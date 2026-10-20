@@ -1,17 +1,16 @@
 """Unit tests for IndMoney normalizer engine."""
-import unittest
 import sys
+import unittest
 from pathlib import Path
 
 # Add src to sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from indmoney_sync.normalizer import (
-    normalize_summary,
     normalize_allocation,
     normalize_holdings,
     normalize_sips,
-    build_normalized_state
+    normalize_summary,
 )
 
 

@@ -1,7 +1,6 @@
 """Market-aware governor determining fetch schedules and market windows."""
 import datetime
 import time
-from typing import Tuple
 
 # Timezone offset for Indian Standard Time (UTC+5:30)
 IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
@@ -37,7 +36,7 @@ def get_market_state(now_ist: datetime.datetime = None) -> str:
     return "CLOSED"
 
 
-def should_execute_fetch(last_fetch_ts: float, force: bool = False) -> Tuple[bool, str, str]:
+def should_execute_fetch(last_fetch_ts: float, force: bool = False) -> tuple[bool, str, str]:
     """
     Decides whether a network fetch should run based on market hours and cache age.
     Returns (should_fetch, reason, market_state).

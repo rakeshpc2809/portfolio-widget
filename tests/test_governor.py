@@ -1,17 +1,13 @@
 """Unit tests for market-aware governor."""
 import datetime
-import unittest
 import sys
+import unittest
 from pathlib import Path
 
 # Add src to sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from indmoney_sync.governor import (
-    IST,
-    get_market_state,
-    should_execute_fetch
-)
+from indmoney_sync.governor import IST, get_market_state, should_execute_fetch
 
 
 class TestGovernor(unittest.TestCase):

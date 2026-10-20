@@ -1,9 +1,9 @@
 """Mock data generator matching the normalized state.json schema."""
 import time
-from typing import Any, Dict
+from typing import Any
 
 
-def get_mock_state() -> Dict[str, Any]:
+def get_mock_state() -> dict[str, Any]:
     return {
         "status": "ok",
         "updated_at": int(time.time()),

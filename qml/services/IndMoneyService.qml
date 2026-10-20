@@ -21,7 +21,11 @@ Singleton {
     property double lastUpdated: 0
 
     property var summary: ({
+        total_portfolio_inr: 0,
         total_networth_inr: 0,
+        bank_inr: 0,
+        epf_inr: 0,
+        non_investment_inr: 0,
         invested_inr: 0,
         total_pnl_inr: 0,
         total_pnl_pct: 0,
@@ -47,6 +51,10 @@ Singleton {
         watchChanges: true
         printErrors: false
         onLoaded: root._applyState(stateWatcher.text())
+        onFileChanged: {
+            stateWatcher.reload()
+            root._applyState(stateWatcher.text())
+        }
         onLoadFailed: error => {
             // If runtime file does not exist yet, fallback to persistent cache
             if (!root.ready) cacheFallback.reload()

@@ -3,13 +3,12 @@ import base64
 import hashlib
 import http.server
 import json
-import os
 import secrets
 import socket
 import subprocess
 import time
 import urllib.parse
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 import httpx
 import keyring
@@ -23,7 +22,7 @@ def base64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("utf-8").rstrip("=")
 
 
-def generate_pkce_pair() -> Tuple[str, str]:
+def generate_pkce_pair() -> tuple[str, str]:
     verifier_bytes = secrets.token_bytes(32)
     verifier = base64url_encode(verifier_bytes)
     digest = hashlib.sha256(verifier.encode("utf-8")).digest()
@@ -37,7 +36,7 @@ def find_free_port() -> int:
         return s.getsockname()[1]
 
 
-def load_tokens() -> Optional[Dict[str, Any]]:
+def load_tokens() -> dict[str, Any] | None:
     try:
         raw = keyring.get_password(SERVICE_NAME, KEYRING_ACCOUNT)
         if raw:
@@ -47,7 +46,7 @@ def load_tokens() -> Optional[Dict[str, Any]]:
     return None
 
 
-def save_tokens(tokens: Dict[str, Any]) -> None:
+def save_tokens(tokens: dict[str, Any]) -> None:
     try:
         raw = json.dumps(tokens)
         keyring.set_password(SERVICE_NAME, KEYRING_ACCOUNT, raw)
@@ -63,19 +62,19 @@ def clear_tokens() -> None:
         pass
 
 
-def is_token_expired(tokens: Dict[str, Any], buffer_sec: int = 60) -> bool:
+def is_token_expired(tokens: dict[str, Any], buffer_sec: int = 60) -> bool:
     expires_at = tokens.get("expires_at", 0)
     return time.time() >= (expires_at - buffer_sec)
 
 
-def discover_endpoints() -> Dict[str, Any]:
+def discover_endpoints() -> dict[str, Any]:
     with httpx.Client(timeout=10.0) as client:
         resp = client.get(DEFAULT_DISCOVERY_URL)
         resp.raise_for_status()
         return resp.json()
 
 
-def refresh_token(tokens: Dict[str, Any], metadata: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+def refresh_token(tokens: dict[str, Any], metadata: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """Attempts to refresh token using refresh_token grant."""
     refresh_token_val = tokens.get("refresh_token")
     client_id = tokens.get("client_id")
@@ -132,9 +131,9 @@ def register_client(registration_endpoint: str, redirect_uri: str) -> str:
 
 
 class OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
-    auth_code: Optional[str] = None
-    state: Optional[str] = None
-    error: Optional[str] = None
+    auth_code: str | None = None
+    state: str | None = None
+    error: str | None = None
 
     def log_message(self, format: str, *args: Any) -> None:
         pass  # Quiet logging
@@ -168,7 +167,7 @@ class OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
 
 
-def execute_browser_auth_flow() -> Dict[str, Any]:
+def execute_browser_auth_flow() -> dict[str, Any]:
     print("[auth] Discovering OAuth authorization server metadata...")
     metadata = discover_endpoints()
     auth_endpoint = metadata["authorization_endpoint"]
@@ -195,7 +194,7 @@ def execute_browser_auth_flow() -> Dict[str, Any]:
     }
     auth_url = f"{auth_endpoint}?{urllib.parse.urlencode(params)}"
 
-    print(f"[auth] Opening browser for IndMoney login...")
+    print("[auth] Opening browser for IndMoney login...")
     print(f"[auth] URL: {auth_url}")
 
     # Launch browser via xdg-open

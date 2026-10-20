@@ -1,6 +1,11 @@
 # IndMoney Portfolio Widget for iNiR / iRiS (Quickshell)
 
-A real-time, privacy-conscious portfolio widget built natively for **snowarch/iNiR** and the **iRiS** desktop shell on Arch Linux / CachyOS and Niri.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Python: 3.10+](https://img.shields.io/badge/python-3.10+-3776ab.svg)](https://www.python.org/)
+[![Code Style: Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![Quickshell: Compatible](https://img.shields.io/badge/Quickshell-iNiR%20%2F%20iRiS-purple.svg)](https://github.com/snowarch/iNiR)
+
+A real-time, privacy-first portfolio widget built natively for **snowarch/iNiR** and the **iRiS** desktop shell on Arch Linux / CachyOS and Niri. Displays your aggregate net worth, daily P&L, asset allocation, top movers, individual holdings, and active SIP schedules with a smooth, glassmorphic UI.
 
 ---
 
@@ -38,44 +43,70 @@ A real-time, privacy-conscious portfolio widget built natively for **snowarch/iN
 ## Key Features
 
 1. **Strict Secret Isolation & Keyring Security:**
-   - OAuth 2.1 PKCE authorization flow via RFC 8414 metadata discovery and dynamic client registration.
-   - Tokens stored exclusively in the Linux kernel keyring / Secret Service via `libsecret` under service name `inir-indmoney-mcp`.
-   - Zero secrets stored in plaintext on disk or in QML memory.
+   - **OAuth 2.1 PKCE:** RFC 8414 metadata discovery and dynamic client registration with short-lived access tokens and refresh rotation.
+   - **Kernel Keyring Integration:** Tokens are stored exclusively in the Linux kernel keyring / Secret Service via `libsecret` under service name `inir-indmoney-mcp`.
+   - **Zero Secrets on Disk or in QML:** Neither plaintext passwords, tokens, nor session cookies are ever saved on disk or exposed to the UI process.
 
 2. **Non-Blocking UI Thread:**
-   - Background Python sync process triggered by `systemd --user` timer.
-   - Quickshell reads local state via non-blocking `FileView` watching tmpfs (`/run/user/$UID/inir-indmoney/state.json`).
+   - The UI process does zero HTTP calls or cryptographic operations.
+   - Quickshell reads local state via non-blocking `FileView` watching RAM-backed tmpfs (`/run/user/$UID/inir-indmoney/state.json`).
+   - Manual refreshes spawn an asynchronous background worker without stalling frame rates.
 
 3. **Market-Aware Polling Governor:**
-   - **NSE / BSE Window (09:00–16:00 IST Mon–Fri):** 15-minute polling.
+   - **NSE / BSE Market Window (09:00–16:00 IST Mon–Fri):** 15-minute polling.
    - **US Market Window (19:00–02:00 IST Mon–Fri):** 15-minute polling.
-   - **Off-Hours / Weekends:** Skips network calls if cache is younger than 60 minutes (bypassed with `--force`).
+   - **Off-Hours / Weekends:** Reuses cached state if younger than 60 minutes (bypassed on-demand with `--force`).
 
 4. **Aesthetic & Modern UX Upgrades:**
-   - **Tabular Figures:** Monospace numerals using `JetBrains Mono Nerd Font` with `font.features: { "tnum": 1 }` to eliminate horizontal jitter.
-   - **Gaussian Blur Privacy Transition:** `QtQuick.Effects` `MultiEffect` Gaussian blur condensing over sensitive numbers on middle-click (`blur: 1.0` over 180ms cubic bezier).
+   - **Tabular Figures:** Monospace numerals using `JetBrains Mono Nerd Font` / `IrisStyle.fontNumbers` with `font.features: { "tnum": 1 }` to eliminate horizontal jitter.
+   - **Gaussian Blur Privacy Mode:** `QtQuick.Effects` `MultiEffect` Gaussian blur condensing over sensitive numbers on middle-click or eye button toggle (`blur: 1.0` over 180ms cubic bezier).
    - **Interactive Hover Scrubbing:** Proportional multi-segment asset allocation bar where hovering dynamically expands segment height (`SpringAnimation`) and morphs live allocation metrics.
-   - **Ambient Market Status Dot:** Emerald pulsing indicator when markets are open (`IN_OPEN` / `US_OPEN`), dimmed when closed, and amber when offline or auth required.
+   - **Ambient Market Status Dot:** Pulsing emerald indicator when Indian or US markets are open, dimmed when closed, and amber when offline or auth is needed.
+
+---
+
+## Prerequisites
+
+- **Linux OS:** Arch Linux, CachyOS, Fedora, or Ubuntu with Wayland (e.g. Niri, Hyprland, Sway).
+- **Python:** 3.10 or higher.
+- **System Dependencies:**
+  ```bash
+  # Arch Linux / CachyOS
+  sudo pacman -S python-httpx python-keyring libsecret
+  # Or install via pip
+  pip install -r requirements.txt
+  ```
+- **Desktop Shell:** [Quickshell](https://outfoxxed.me/quickshell/) with the [iNiR desktop configuration](https://github.com/snowarch/iNiR).
 
 ---
 
 ## Installation & Setup
 
-### Quick Install
+### 1. Install Widget & Systemd Service
 
+Run the installer from the repository root:
 ```bash
-cd ~/Projects/portfolio-widget
+git clone https://github.com/rakeshpc2809/portfolio-widget.git
+cd portfolio-widget
 make install
 ```
 
-This will:
+This automated script will:
 1. Symlink `indmoney-sync` to `~/.local/bin/indmoney-sync`.
-2. Configure `~/.config/user-tmpfiles.d/inir-indmoney.conf` to guarantee runtime dir existence.
+2. Configure `~/.config/user-tmpfiles.d/inir-indmoney.conf` to guarantee runtime directory creation on boot.
 3. Install and activate systemd user service `inir-indmoney-sync.service` and timer `inir-indmoney-sync.timer`.
 4. Link QML components into `~/.config/quickshell/inir/`.
 5. Register `IndMoneyService` in `services/qmldir`.
 6. Register the `portfolio` piece into `IrisPieces.qml`, `IrisBubbleFace.qml`, and `IrisCardContent.qml`.
-7. Generate initial offline mock state.
+7. Generate initial offline mock state so the widget renders immediately.
+
+### 2. Connect Your Live Account (Optional)
+
+To link your live IndMoney account via OAuth 2.1 PKCE:
+```bash
+indmoney-sync auth
+```
+This opens your default web browser for secure login (Mobile + OTP + MPIN). Upon approval, tokens are saved directly to your encrypted OS keyring.
 
 ---
 
@@ -95,7 +126,7 @@ This will:
 ## Widget Interactions
 
 ### Compact Bubble / Pill (`PortfolioPiece.qml`)
-* **Left-Click:** Morphs/expands the Island stage into `PortfolioCard.qml`.
+* **Left-Click:** Morphs and expands the Island stage into `PortfolioCard.qml`.
 * **Middle-Click:** Toggles **Privacy Mode** (smooth Gaussian blur condensation over currency amounts).
 * **Right-Click:** Triggers an immediate background sync (`indmoney-sync fetch --force`) with a pulsing indicator dot.
 
@@ -109,14 +140,51 @@ This will:
 
 ---
 
+## Privacy & Security Model
+
+This project was built from the ground up to prevent data leakage:
+- **No Hardcoded Credentials:** No credentials or API secrets are stored in the codebase or git history.
+- **Volatile Storage for Financial Balances:** Active portfolio state resides in tmpfs (`/run/user/$UID/inir-indmoney/state.json`) which is cleared on logout or shutdown.
+- **Secure Keyring:** Refresh tokens and client secrets are stored in `libsecret` (GNOME Keyring / KWallet).
+- **Auditable & Offline Testing:** Fully functional offline mode via `indmoney-sync mock` without requiring network access or personal data.
+
+---
+
 ## Testing & Quality Assurance
 
 Run the test suite:
 ```bash
 make test
+# or
+pytest
 ```
 
-Runs:
-- `test_normalizer.py`: Math, schema mapping, and top movers selection.
-- `test_governor.py`: IST and US market window calculations and off-hours scheduling.
-- Validated against iNiR's `test-iris-defaults.py` and `test-iris-performance-contract.py`.
+Run code formatting and linting:
+```bash
+ruff check .
+```
+
+---
+
+## Troubleshooting
+
+- **Keyring is locked or unavailable:**
+  Ensure a Secret Service daemon (such as `gnome-keyring` or `keepassxc`) is running and unlocked in your desktop session.
+  ```bash
+  python3 -c "import keyring; print(keyring.get_keyring())"
+  ```
+- **Force an immediate update:**
+  ```bash
+  indmoney-sync fetch --force -v
+  ```
+- **Inspect systemd sync timer:**
+  ```bash
+  systemctl --user status inir-indmoney-sync.timer
+  journalctl --user -u inir-indmoney-sync.service -e
+  ```
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).

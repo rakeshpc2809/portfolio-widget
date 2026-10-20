@@ -1,8 +1,7 @@
 """Schema inspector dumping live MCP tool schemas and responses for grounding normalizer."""
 import json
-import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 from .auth import load_tokens, refresh_token
 from .client import ALLOWED_TOOLS, IndMoneyMcpClient
@@ -12,7 +11,7 @@ DUMP_FILE = CACHE_DIR / "raw_dump.json"
 MCP_ENDPOINT = "https://mcp.indmoney.com/mcp"
 
 
-def run_inspect() -> Dict[str, Any]:
+def run_inspect() -> dict[str, Any]:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     tokens = load_tokens()
     if not tokens:
@@ -26,7 +25,7 @@ def run_inspect() -> Dict[str, Any]:
     access_token = tokens["access_token"]
     print(f"[inspect] Connecting to MCP endpoint: {MCP_ENDPOINT}")
 
-    dump_payload: Dict[str, Any] = {
+    dump_payload: dict[str, Any] = {
         "tools_list": [],
         "tool_samples": {}
     }
@@ -57,6 +56,6 @@ def run_inspect() -> Dict[str, Any]:
     with open(DUMP_FILE, "w", encoding="utf-8") as f:
         json.dump(dump_payload, f, indent=2)
 
-    print(f"\n[inspect] Successfully dumped raw tool schemas & samples to:")
+    print("\n[inspect] Successfully dumped raw tool schemas & samples to:")
     print(f"          {DUMP_FILE}")
     return dump_payload

@@ -1,6 +1,6 @@
 """Streamable HTTP MCP Client (MCP 2025-03-26 protocol) with SSE and direct JSON parsing."""
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import httpx
 
@@ -19,7 +19,7 @@ BLOCKED_TOOLS = {
 
 
 class IndMoneyMcpClient:
-    def __init__(self, endpoint: str, access_token: str, session_id: Optional[str] = None):
+    def __init__(self, endpoint: str, access_token: str, session_id: str | None = None):
         self.endpoint = endpoint
         self.access_token = access_token
         self.session_id = session_id
@@ -39,7 +39,7 @@ class IndMoneyMcpClient:
         self._request_id += 1
         return self._request_id
 
-    def _send_rpc(self, method: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _send_rpc(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         req_id = self._next_id()
         payload = {
             "jsonrpc": "2.0",
@@ -99,7 +99,7 @@ class IndMoneyMcpClient:
 
         return data.get("result", {})
 
-    def initialize(self) -> Dict[str, Any]:
+    def initialize(self) -> dict[str, Any]:
         params = {
             "protocolVersion": "2025-03-26",
             "capabilities": {},
@@ -110,11 +110,11 @@ class IndMoneyMcpClient:
         }
         return self._send_rpc("initialize", params)
 
-    def list_tools(self) -> List[Dict[str, Any]]:
+    def list_tools(self) -> list[dict[str, Any]]:
         result = self._send_rpc("tools/list")
         return result.get("tools", [])
 
-    def call_tool(self, name: str, arguments: Optional[Dict[str, Any]] = None) -> Any:
+    def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
         if name in BLOCKED_TOOLS:
             raise PermissionError(f"Tool '{name}' is in the blocked write operations list.")
         if name not in ALLOWED_TOOLS:
@@ -126,29 +126,45 @@ class IndMoneyMcpClient:
         }
         result = self._send_rpc("tools/call", params)
 
-        # Check for structuredContent first (MCP spec)
+        raw_val = None
         if isinstance(result, dict) and "structuredContent" in result:
-            return result["structuredContent"]
+            raw_val = result["structuredContent"]
+        elif isinstance(result, dict) and "content" in result:
+            content = result.get("content", [])
+            if isinstance(content, list) and len(content) > 0:
+                first = content[0]
+                if isinstance(first, dict) and "text" in first:
+                    raw_val = str(first["text"]).strip()
+        else:
+            raw_val = result
 
-        content = result.get("content", [])
+        # If raw_val is a string, unwrap code fences and parse JSON
+        if isinstance(raw_val, str):
+            val_str = raw_val.strip()
+            if val_str.startswith("```"):
+                lines = val_str.split("\n")
+                if len(lines) >= 2 and lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                val_str = "\n".join(lines).strip()
+            try:
+                raw_val = json.loads(val_str)
+            except Exception:
+                pass
 
-        # MCP tools return an array of text/image content items
-        if isinstance(content, list) and len(content) > 0:
-            first = content[0]
-            if isinstance(first, dict) and "text" in first:
-                text_val = str(first["text"]).strip()
-                # Strip markdown code fences if present (e.g. ```json ... ```)
-                if text_val.startswith("```"):
-                    lines = text_val.split("\n")
-                    if len(lines) >= 2 and lines[0].startswith("```"):
-                        lines = lines[1:]
-                    if lines and lines[-1].strip() == "```":
-                        lines = lines[:-1]
-                    text_val = "\n".join(lines).strip()
-
+        # If raw_val is a dict with "result" containing inner JSON string, unwrap it
+        if isinstance(raw_val, dict) and "result" in raw_val:
+            res_inner = raw_val["result"]
+            if isinstance(res_inner, str):
                 try:
-                    return json.loads(text_val)
-                except (json.JSONDecodeError, TypeError):
-                    return text_val
-        return content
+                    return json.loads(res_inner)
+                except Exception:
+                    pass
+            elif isinstance(res_inner, (dict, list)):
+                return res_inner
+
+        return raw_val
+
+
 

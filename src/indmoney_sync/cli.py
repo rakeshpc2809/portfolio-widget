@@ -6,14 +6,14 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 from .auth import (
     clear_tokens,
     execute_browser_auth_flow,
     is_token_expired,
     load_tokens,
-    refresh_token
+    refresh_token,
 )
 from .client import IndMoneyMcpClient
 from .governor import get_market_state, should_execute_fetch
@@ -38,7 +38,7 @@ def ensure_dirs() -> None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def write_atomic_state(payload: Dict[str, Any]) -> None:
+def write_atomic_state(payload: dict[str, Any]) -> None:
     ensure_dirs()
     # Write to tmp file first
     with open(STATE_TMP_FILE, "w", encoding="utf-8") as f:
@@ -63,7 +63,7 @@ def notify_user(title: str, message: str, urgency: str = "normal") -> None:
         pass
 
 
-def get_cached_or_default_state() -> Dict[str, Any]:
+def get_cached_or_default_state() -> dict[str, Any]:
     if LAST_GOOD_FILE.exists():
         try:
             with open(LAST_GOOD_FILE, "r", encoding="utf-8") as f:
@@ -162,13 +162,25 @@ def cmd_fetch(args: argparse.Namespace) -> int:
                 print("[indmoney-sync] Fetching networth_snapshot...")
             snapshot = client.call_tool("networth_snapshot")
 
-            if verbose:
-                print("[indmoney-sync] Fetching networth_allocation_breakdown...")
-            allocation = client.call_tool("networth_allocation_breakdown")
+            # Extract allocation directly from snapshot assets/investments
+            allocation = None
+            if isinstance(snapshot, dict):
+                allocation = snapshot.get("assets") or snapshot.get("investments")
 
             if verbose:
-                print("[indmoney-sync] Fetching networth_holdings...")
-            holdings = client.call_tool("networth_holdings")
+                print("[indmoney-sync] Fetching holdings (MF, IND_STOCK, US_STOCK)...")
+            holdings = []
+            for asset_type in ["MF", "IND_STOCK", "US_STOCK"]:
+                try:
+                    res = client.call_tool("networth_holdings", {"asset_type": asset_type})
+                    if isinstance(res, dict) and "holdings" in res and isinstance(res["holdings"], list):
+                        holdings.extend(res["holdings"])
+                    elif isinstance(res, list):
+                        holdings.extend(res)
+                except Exception as e:
+                    if verbose:
+                        print(f"[indmoney-sync] Warning fetching {asset_type} holdings: {e}")
+
 
             # Slow tier tools (SIPs) - cache for 6 hours
             now = time.time()
@@ -246,7 +258,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     market = get_market_state()
 
     print("=== IndMoney Sync Status ===")
-    print(f"Keyring Service: inir-indmoney-mcp")
+    print("Keyring Service: inir-indmoney-mcp")
     print(f"Authenticated:   {'YES' if has_token else 'NO'}")
     if has_token:
         exp_in = int((tokens.get("expires_at", 0) - time.time()) / 60)

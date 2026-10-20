@@ -32,20 +32,27 @@ systemctl --user enable --now inir-indmoney-sync.timer
 echo "[3/6] Installing QML components..."
 mkdir -p "$INIR_DIR/services"
 mkdir -p "$INIR_DIR/modules/iris/pieces"
-mkdir -p "$INIR_DIR/modules/iris/cards"
+mkdir -p "$INIR_DIR/modules/iris/stage"
 
 ln -sf "$SCRIPT_DIR/qml/services/IndMoneyService.qml" "$INIR_DIR/services/IndMoneyService.qml"
 ln -sf "$SCRIPT_DIR/qml/modules/iris/pieces/PortfolioPiece.qml" "$INIR_DIR/modules/iris/pieces/PortfolioPiece.qml"
-ln -sf "$SCRIPT_DIR/qml/modules/iris/cards/PortfolioCard.qml" "$INIR_DIR/modules/iris/cards/PortfolioCard.qml"
+ln -sf "$SCRIPT_DIR/qml/modules/iris/cards/PortfolioCard.qml" "$INIR_DIR/modules/iris/stage/PortfolioCard.qml"
 
-# 5. Register in services/qmldir
-echo "[4/6] Updating services/qmldir..."
+# 5. Register in qmldir files
+echo "[4/6] Updating qmldir registries..."
 QMLDIR="$INIR_DIR/services/qmldir"
 if ! grep -q "IndMoneyService" "$QMLDIR"; then
     echo "singleton IndMoneyService 1.0 IndMoneyService.qml" >> "$QMLDIR"
-    echo "  -> Added IndMoneyService to qmldir"
-else
-    echo "  -> IndMoneyService already registered in qmldir"
+fi
+
+PIECES_QMLDIR="$INIR_DIR/modules/iris/pieces/qmldir"
+if ! grep -q "PortfolioPiece" "$PIECES_QMLDIR"; then
+    echo "PortfolioPiece 1.0 PortfolioPiece.qml" >> "$PIECES_QMLDIR"
+fi
+
+STAGE_QMLDIR="$INIR_DIR/modules/iris/stage/qmldir"
+if ! grep -q "PortfolioCard" "$STAGE_QMLDIR"; then
+    echo "PortfolioCard 1.0 PortfolioCard.qml" >> "$STAGE_QMLDIR"
 fi
 
 # 6. Patch IrisPieces.qml, IrisBubbleFace.qml, and IrisCardContent.qml
