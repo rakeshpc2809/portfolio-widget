@@ -3,6 +3,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Effects
+import QtQuick.Shapes
 import qs.services
 import qs.modules.common
 import qs.modules.common.widgets
@@ -27,23 +28,106 @@ ColumnLayout {
     readonly property bool isDayGain: dayPct >= 0
     readonly property bool isTotalGain: totalPnl >= 0
 
-    // Theme-resilient contrast tokens
+    // Theme-resilient contrast tokens using dynamic IrisStyle palette
     readonly property color fgMain: IrisStyle.light ? IrisStyle.text : (root.isDarkHex(IrisStyle.text) ? IrisStyle.inkOnDark : IrisStyle.text)
-    readonly property color fgMuted: IrisStyle.light ? IrisStyle.subtext : Qt.rgba(0.96, 0.96, 0.97, 0.65)
-    readonly property color rowBg: Qt.rgba(1, 1, 1, 0.04)
+    readonly property color fgMuted: IrisStyle.subtext
+    readonly property color rowBg: IrisStyle.fillSecondary
     readonly property color rowBgHover: IrisStyle.fillHover
 
     function isDarkHex(c: color): bool {
-        // Returns true if color has low luminance (< 0.4)
         return (0.299 * c.r + 0.587 * c.g + 0.114 * c.b) < 0.4
     }
 
+    // Dynamic asset class color mapping using IrisStyle.identity tokens
+    function getAssetColor(assetName: string): color {
+        const name = (assetName || "").toLowerCase()
+        if (name.includes("mutual") || name.includes("mf")) return IrisStyle.identity.indigo || IrisStyle.accent
+        if (name.includes("us")) return IrisStyle.identity.magenta || IrisStyle.identity.teal
+        if (name.includes("indian") || name.includes("in_eq") || name.includes("stock") || name.includes("equity")) return IrisStyle.identity.sky
+        if (name.includes("fixed") || name.includes("fd") || name.includes("deposit") || name.includes("gold")) return IrisStyle.identity.amber
+        if (name.includes("epf") || name.includes("retirement")) return IrisStyle.identity.orange
+        return IrisStyle.identity.teal
+    }
+
     property int activeTab: 0 // 0: Top Movers, 1: Holdings, 2: SIPs
-    property string holdingFilter: "ALL" // "ALL", "MF", "IN_EQ"
+    property string holdingFilter: "ALL" // "ALL", "MF", "IN_EQ", "US_EQ"
+    property string topMoversSort: "PCT" // "PCT" or "INR"
     property var hoveredAlloc: null
 
     spacing: Math.round(10 * root.d)
     Layout.fillWidth: true
+    focus: true
+
+    // --- Keyboard-First Navigation ---
+    Keys.onPressed: event => {
+        if (event.key === Qt.Key_1) {
+            root.activeTab = 0
+            event.accepted = true
+        } else if (event.key === Qt.Key_2) {
+            root.activeTab = 1
+            event.accepted = true
+        } else if (event.key === Qt.Key_3) {
+            root.activeTab = 2
+            event.accepted = true
+        } else if (event.key === Qt.Key_Tab) {
+            const filters = ["ALL", "MF", "IN_EQ", "US_EQ"]
+            const idx = filters.indexOf(root.holdingFilter)
+            const nextIdx = (idx + 1) % filters.length
+            root.holdingFilter = filters[nextIdx]
+            event.accepted = true
+        } else if (event.key === Qt.Key_P) {
+            IndMoneyService.togglePrivacy()
+            event.accepted = true
+        } else if (event.key === Qt.Key_R) {
+            IndMoneyService.refresh()
+            event.accepted = true
+        }
+    }
+
+    // Sorted Top Movers by % Change or ₹ Impact
+    readonly property var sortedTopMovers: {
+        const list = (IndMoneyService.topMovers || []).slice()
+        if (root.topMoversSort === "INR") {
+            return list.sort((a, b) => Math.abs(b.day_change_inr ?? 0) - Math.abs(a.day_change_inr ?? 0))
+        } else {
+            return list.sort((a, b) => Math.abs(b.day_pct ?? 0) - Math.abs(a.day_pct ?? 0))
+        }
+    }
+
+    // Helper to calculate polyline points for sparkline shape
+    function generateSparklinePoints(pts: var, w: real, h: real): var {
+        if (!pts || pts.length < 2) return { line: [], fill: [] }
+        let minVal = pts[0].v
+        let maxVal = pts[0].v
+        for (let i = 1; i < pts.length; i++) {
+            if (pts[i].v < minVal) minVal = pts[i].v
+            if (pts[i].v > maxVal) maxVal = pts[i].v
+        }
+        let range = maxVal - minVal
+        if (range <= 0.001) range = 1.0
+
+        const padTop = h * 0.18
+        const padBottom = h * 0.12
+        const availH = h - padTop - padBottom
+
+        const linePoints = []
+        const fillPoints = []
+        const stepX = w / (pts.length - 1)
+
+        fillPoints.push(Qt.point(0, h))
+
+        for (let i = 0; i < pts.length; i++) {
+            const x = i * stepX
+            const normalized = (pts[i].v - minVal) / range
+            const y = padTop + availH * (1.0 - normalized)
+            const pt = Qt.point(x, y)
+            linePoints.push(pt)
+            fillPoints.push(pt)
+        }
+
+        fillPoints.push(Qt.point(w, h))
+        return { line: linePoints, fill: fillPoints }
+    }
 
     // --- Header ---
     CardHeader {
@@ -54,6 +138,7 @@ ColumnLayout {
             if (IndMoneyService.status === "auth_required") return Translation.tr("Authentication required")
             if (IndMoneyService.marketState === "IN_OPEN") return Translation.tr("NSE / BSE Open")
             if (IndMoneyService.marketState === "US_OPEN") return Translation.tr("US Markets Open")
+            if (IndMoneyService.marketState === "CACHED") return Translation.tr("Cached State")
             return Translation.tr("Markets Closed")
         }
 
@@ -64,13 +149,14 @@ ColumnLayout {
         }
 
         IrisIconButton {
+            id: refreshBtn
             materialIcon: "refresh"
             Accessible.name: Translation.tr("Refresh Portfolio")
             enabled: !IndMoneyService.syncing
             onClicked: IndMoneyService.refresh()
 
             RotationAnimation on rotation {
-                running: IndMoneyService.syncing
+                running: IndMoneyService.syncing && root.visible
                 loops: Animation.Infinite
                 from: 0
                 to: 360
@@ -115,12 +201,74 @@ ColumnLayout {
         spacing: Math.round(10 * root.d)
         visible: IndMoneyService.status !== "auth_required"
 
-        // --- Investment Portfolio Hero Platter ---
+        // --- Investment Portfolio Hero Platter with Intraday Sparkline ---
         Rectangle {
+            id: heroPlatter
             Layout.fillWidth: true
             implicitHeight: heroCol.implicitHeight + Math.round(22 * root.d)
             radius: IrisStyle.radiusTile
             color: root.rowBg
+            clip: true
+
+            // Intraday Net-Worth Background Sparkline
+            Item {
+                id: sparklineArea
+                anchors.fill: parent
+                opacity: IndMoneyService.privacyMode ? 0.0 : 0.85
+                visible: opacity > 0.01 && IndMoneyService.sparkline && IndMoneyService.sparkline.length > 1
+
+                Behavior on opacity {
+                    NumberAnimation {
+                        duration: 180
+                        easing.type: Easing.InOutCubic
+                    }
+                }
+
+                readonly property var pathData: root.generateSparklinePoints(
+                    IndMoneyService.sparkline,
+                    sparklineArea.width,
+                    sparklineArea.height
+                )
+
+                Shape {
+                    anchors.fill: parent
+                    layer.enabled: true
+                    layer.samples: 4
+                    asynchronous: false
+
+                    // Gradient Fill Beneath Line
+                    ShapePath {
+                        strokeColor: "transparent"
+                        fillGradient: LinearGradient {
+                            x1: 0; y1: 0
+                            x2: 0; y2: sparklineArea.height
+                            GradientStop {
+                                position: 0.0
+                                color: Qt.alpha(root.isDayGain ? IrisStyle.identity.green : IrisStyle.identity.red, 0.20)
+                            }
+                            GradientStop {
+                                position: 1.0
+                                color: Qt.alpha(root.isDayGain ? IrisStyle.identity.green : IrisStyle.identity.red, 0.0)
+                            }
+                        }
+                        PathPolyline {
+                            path: sparklineArea.pathData.fill
+                        }
+                    }
+
+                    // Stroke Curve
+                    ShapePath {
+                        strokeWidth: 1.5
+                        strokeColor: root.isDayGain ? IrisStyle.identity.green : IrisStyle.identity.red
+                        fillColor: "transparent"
+                        capStyle: ShapePath.RoundCap
+                        joinStyle: ShapePath.RoundJoin
+                        PathPolyline {
+                            path: sparklineArea.pathData.line
+                        }
+                    }
+                }
+            }
 
             ColumnLayout {
                 id: heroCol
@@ -167,17 +315,18 @@ ColumnLayout {
                             opacity: IndMoneyService.privacyMode ? 0.2 : 1.0
                             visible: IndMoneyService.privacyMode
                             Behavior on blur { NumberAnimation { duration: 180; easing.type: Easing.InOutCubic } }
+                            Behavior on opacity { NumberAnimation { duration: 180; easing.type: Easing.InOutCubic } }
                         }
                     }
 
                     Item { Layout.fillWidth: true }
 
-                    // 1D Pill
+                    // 1D Return Pill
                     Rectangle {
                         implicitWidth: dayRow.implicitWidth + Math.round(10 * root.d)
                         implicitHeight: Math.round(22 * root.d)
                         radius: height / 2
-                        color: root.isDayGain ? Qt.rgba(0.2, 0.78, 0.35, 0.15) : Qt.rgba(1.0, 0.27, 0.23, 0.15)
+                        color: root.isDayGain ? Qt.alpha(IrisStyle.identity.green, 0.15) : Qt.alpha(IrisStyle.identity.red, 0.15)
 
                         RowLayout {
                             id: dayRow
@@ -229,7 +378,7 @@ ColumnLayout {
             }
         }
 
-        // --- Bank & Other Assets (Separated from Investments) ---
+        // --- Bank & Other Assets Split Chips ---
         RowLayout {
             Layout.fillWidth: true
             spacing: Math.round(6 * root.d)
@@ -400,7 +549,7 @@ ColumnLayout {
                         width: Math.max(3, (allocBar.width - ((IndMoneyService.allocation.length - 1) * 2)) * (modelData.weight_pct / 100.0))
                         height: segMouse.containsMouse ? Math.round(9 * root.d) : Math.round(5 * root.d)
                         radius: 2.5
-                        color: modelData.color || IrisStyle.identity.teal
+                        color: root.getAssetColor(modelData.asset)
 
                         Behavior on height {
                             SpringAnimation {
@@ -441,8 +590,56 @@ ColumnLayout {
             spacing: Math.round(4 * root.d)
             visible: root.activeTab === 0
 
+            // Header Row with Sort Attribution Pill
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Math.round(6 * root.d)
+
+                Text {
+                    text: Translation.tr("Daily Leaders")
+                    font.pixelSize: IrisStyle.typeMeta
+                    color: root.fgMuted
+                }
+
+                Item { Layout.fillWidth: true }
+
+                Rectangle {
+                    implicitWidth: sortRow.implicitWidth + Math.round(10 * root.d)
+                    implicitHeight: Math.round(20 * root.d)
+                    radius: height / 2
+                    color: sortMouse.containsMouse ? IrisStyle.fillHover : root.rowBg
+
+                    RowLayout {
+                        id: sortRow
+                        anchors.centerIn: parent
+                        spacing: Math.round(3 * root.d)
+
+                        MaterialSymbol {
+                            text: "sort"
+                            iconSize: Math.round(11 * root.d)
+                            color: IrisStyle.identity.teal
+                        }
+
+                        Text {
+                            text: root.topMoversSort === "PCT" ? Translation.tr("Sort: % Change") : Translation.tr("Sort: ₹ Impact")
+                            font.pixelSize: Math.round(9.5 * root.d)
+                            font.weight: IrisStyle.weight(Font.Medium)
+                            color: IrisStyle.identity.teal
+                        }
+                    }
+
+                    MouseArea {
+                        id: sortMouse
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        hoverEnabled: true
+                        onClicked: root.topMoversSort = (root.topMoversSort === "PCT" ? "INR" : "PCT")
+                    }
+                }
+            }
+
             Repeater {
-                model: IndMoneyService.topMovers
+                model: root.sortedTopMovers
 
                 Rectangle {
                     id: moverRow
@@ -474,7 +671,7 @@ ColumnLayout {
                                 font.weight: IrisStyle.weight(Font.Medium)
                                 color: root.fgMain
                                 elide: Text.ElideRight
-                                Layout.maximumWidth: Math.round(210 * root.d)
+                                Layout.maximumWidth: Math.round(180 * root.d)
                             }
 
                             Text {
@@ -484,17 +681,19 @@ ColumnLayout {
                             }
                         }
 
+                        // Attribution Chip with both Rupee Impact and Percentage Change
                         Rectangle {
-                            implicitWidth: Math.round(52 * root.d)
-                            implicitHeight: Math.round(18 * root.d)
+                            implicitWidth: moverBadgeText.implicitWidth + Math.round(10 * root.d)
+                            implicitHeight: Math.round(20 * root.d)
                             radius: 3
-                            color: moverRow.modelData.day_pct >= 0 ? Qt.rgba(0.2, 0.78, 0.35, 0.15) : Qt.rgba(1.0, 0.27, 0.23, 0.15)
+                            color: moverRow.modelData.day_pct >= 0 ? Qt.alpha(IrisStyle.identity.green, 0.15) : Qt.alpha(IrisStyle.identity.red, 0.15)
 
                             Text {
+                                id: moverBadgeText
                                 anchors.centerIn: parent
-                                text: IndMoneyService.formatPct(moverRow.modelData.day_pct)
+                                text: (moverRow.modelData.day_change_inr >= 0 ? "+" : "") + IndMoneyService.formatInrCompact(moverRow.modelData.day_change_inr, IndMoneyService.privacyMode) + " · " + IndMoneyService.formatPct(moverRow.modelData.day_pct)
                                 font.family: IrisStyle.fontNumbers
-                                font.pixelSize: Math.round(10 * root.d)
+                                font.pixelSize: Math.round(9.5 * root.d)
                                 font.weight: IrisStyle.weight(Font.Bold)
                                 font.features: ({ "tnum": 1 })
                                 color: moverRow.modelData.day_pct >= 0 ? IrisStyle.identity.green : IrisStyle.identity.red
@@ -511,7 +710,7 @@ ColumnLayout {
             spacing: Math.round(4 * root.d)
             visible: root.activeTab === 1
 
-            // Category Filter Pills
+            // Category Filter Pills (Cycleable via Tab key)
             RowLayout {
                 Layout.fillWidth: true
                 spacing: Math.round(6 * root.d)
@@ -520,17 +719,19 @@ ColumnLayout {
                     model: [
                         { label: "All", filter: "ALL" },
                         { label: "Mutual Funds", filter: "MF" },
-                        { label: "Stocks", filter: "IN_EQ" }
+                        { label: "Indian Stocks", filter: "IN_EQ" },
+                        { label: "US Stocks", filter: "US_EQ" }
                     ]
 
                     Rectangle {
                         required property var modelData
-                        implicitWidth: Math.round(58 * root.d)
+                        implicitWidth: filterText.implicitWidth + Math.round(12 * root.d)
                         implicitHeight: Math.round(20 * root.d)
                         radius: height / 2
                         color: root.holdingFilter === modelData.filter ? IrisStyle.identity.teal : root.rowBg
 
                         Text {
+                            id: filterText
                             anchors.centerIn: parent
                             text: parent.modelData.label
                             font.pixelSize: Math.round(9.5 * root.d)
@@ -633,10 +834,10 @@ ColumnLayout {
             spacing: Math.round(6 * root.d)
             visible: root.activeTab === 2
 
-            // Monthly Total Card
+            // Monthly Total Card with Liquidity Coverage Badge
             Rectangle {
                 Layout.fillWidth: true
-                implicitHeight: Math.round(44 * root.d)
+                implicitHeight: Math.round(48 * root.d)
                 radius: IrisStyle.radiusTile
                 color: root.rowBg
 
@@ -663,11 +864,48 @@ ColumnLayout {
 
                     Item { Layout.fillWidth: true }
 
-                    Text {
-                        text: Translation.tr("%1 Active SIPs").arg(IndMoneyService.sips.active_count ?? 0)
-                        font.pixelSize: IrisStyle.typeLabel
-                        font.weight: IrisStyle.weight(Font.Medium)
-                        color: root.fgMain
+                    ColumnLayout {
+                        spacing: Math.round(2 * root.d)
+                        Layout.alignment: Qt.AlignRight
+
+                        Text {
+                            text: Translation.tr("%1 Active SIPs").arg(IndMoneyService.sips.active_count ?? 0)
+                            font.pixelSize: IrisStyle.typeLabel
+                            font.weight: IrisStyle.weight(Font.Medium)
+                            color: root.fgMain
+                            Layout.alignment: Qt.AlignRight
+                        }
+
+                        // 7-Day Liquidity Coverage Badge
+                        Rectangle {
+                            readonly property bool hasUpcoming: (IndMoneyService.sips.next_7d_sip_inr ?? 0) > 0
+                            readonly property bool covered: IndMoneyService.sips.sip_coverage_ok ?? true
+                            visible: hasUpcoming
+                            implicitWidth: covRow.implicitWidth + Math.round(8 * root.d)
+                            implicitHeight: Math.round(18 * root.d)
+                            radius: height / 2
+                            color: covered ? Qt.alpha(IrisStyle.identity.green, 0.15) : Qt.alpha(IrisStyle.identity.orange, 0.15)
+                            Layout.alignment: Qt.AlignRight
+
+                            RowLayout {
+                                id: covRow
+                                anchors.centerIn: parent
+                                spacing: Math.round(3 * root.d)
+
+                                MaterialSymbol {
+                                    text: parent.parent.covered ? "check_circle" : "warning"
+                                    iconSize: Math.round(11 * root.d)
+                                    color: parent.parent.covered ? IrisStyle.identity.green : IrisStyle.identity.orange
+                                }
+
+                                Text {
+                                    text: parent.parent.covered ? Translation.tr("7D Covered") : Translation.tr("Low Bank Buffer")
+                                    font.pixelSize: Math.round(9 * root.d)
+                                    font.weight: IrisStyle.weight(Font.DemiBold)
+                                    color: parent.parent.covered ? IrisStyle.identity.green : IrisStyle.identity.orange
+                                }
+                            }
+                        }
                     }
                 }
             }

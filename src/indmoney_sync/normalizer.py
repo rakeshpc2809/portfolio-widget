@@ -1,4 +1,5 @@
 """Data normalization engine converting raw IndMoney MCP payloads to normalized state.json."""
+import datetime
 import json
 import time
 from typing import Any
@@ -69,6 +70,35 @@ def _parse_json_if_str(val: Any) -> Any:
 
 
 NON_INVESTMENT_CATEGORIES = {"RETIREMENT", "EPF", "PPF", "NPS", "LIQUID", "SA", "BANK", "SAVINGS", "CASH"}
+
+
+def update_sparkline(
+    prev_sparkline: list[dict[str, Any]] | None,
+    current_val: float,
+    current_ts: int | None = None,
+    max_points: int = 30
+) -> list[dict[str, Any]]:
+    """
+    Appends {ts, v} to the ring buffer when value changes or >15m (900s) has elapsed.
+    Caps the buffer at max_points (30).
+    """
+    if current_ts is None:
+        current_ts = int(time.time())
+
+    sparkline = [dict(pt) for pt in prev_sparkline] if isinstance(prev_sparkline, list) else []
+
+    if not sparkline:
+        sparkline.append({"ts": current_ts, "v": round(current_val, 2)})
+    else:
+        last_pt = sparkline[-1]
+        last_ts = int(last_pt.get("ts", 0))
+        last_v = float(last_pt.get("v", 0.0))
+
+        # Append when value changes by >= 1 rupee or >= 15m has elapsed
+        if abs(current_val - last_v) >= 1.0 or (current_ts - last_ts) >= 900:
+            sparkline.append({"ts": current_ts, "v": round(current_val, 2)})
+
+    return sparkline[-max_points:]
 
 
 def normalize_summary(raw_snapshot: Any, raw_holdings: Any = None) -> dict[str, Any]:
@@ -158,78 +188,59 @@ def normalize_summary(raw_snapshot: Any, raw_holdings: Any = None) -> dict[str, 
         if isinstance(raw_holdings, list):
             holding_items = raw_holdings
         elif isinstance(raw_holdings, dict):
-            holding_items = raw_holdings.get("holdings") or raw_holdings.get("data") or []
-        day_change_inr = sum(_safe_float(h.get("one_day_change") or h.get("day_change")) for h in holding_items if isinstance(h, dict))
+            holding_items = raw_holdings.get("holdings") or raw_holdings.get("data") or raw_holdings.get("items") or []
 
-    base_for_pct = total_portfolio if total_portfolio > 0 else total_networth
+        for h in holding_items:
+            if isinstance(h, dict):
+                val = _safe_float(h.get("market_value") or h.get("value_inr") or h.get("current_value") or h.get("value"))
+                day_pct = _safe_float(h.get("one_day_change_percentage") or h.get("day_pct") or h.get("day_change_pct") or h.get("one_day_return_pct"))
+                if day_pct != 0.0 and val > 0:
+                    day_change_inr += val * (day_pct / (100.0 + day_pct))
+
     day_change_pct = _safe_float(
         raw_snapshot.get("day_change_pct")
         or raw_snapshot.get("day_change_percentage")
         or raw_snapshot.get("one_day_return_pct")
     )
-    if day_change_pct == 0.0 and base_for_pct > 0 and day_change_inr != 0.0:
-        day_change_pct = round((day_change_inr / base_for_pct) * 100.0, 2)
 
-    total_pnl_inr = _safe_float(
-        raw_snapshot.get("total_pnl_inr")
-        or raw_snapshot.get("total_pnl")
-        or raw_snapshot.get("overall_return")
-        or raw_snapshot.get("gain_loss")
-    )
-    if total_pnl_inr == 0.0 and total_portfolio > 0 and portfolio_invested > 0:
-        total_pnl_inr = total_portfolio - portfolio_invested
+    if day_change_pct == 0.0 and total_portfolio > 0:
+        prev_portfolio = total_portfolio - day_change_inr
+        if prev_portfolio > 0:
+            day_change_pct = (day_change_inr / prev_portfolio) * 100.0
 
-    total_pnl_pct = _safe_float(
-        raw_snapshot.get("total_pnl_pct")
-        or raw_snapshot.get("overall_return_pct")
-        or raw_snapshot.get("returns_percentage")
-    )
-    if total_pnl_pct == 0.0 and portfolio_invested > 0:
-        total_pnl_pct = round((total_pnl_inr / portfolio_invested) * 100.0, 2)
+    total_pnl = total_portfolio - portfolio_invested if (total_portfolio > 0 and portfolio_invested > 0) else 0.0
+    total_pnl_pct = (total_pnl / portfolio_invested * 100.0) if portfolio_invested > 0 else 0.0
 
     return {
-        "total_networth_inr": round(total_networth, 2),
         "total_portfolio_inr": round(total_portfolio, 2),
-        "invested_inr": round(portfolio_invested, 2),
-        "total_pnl_inr": round(total_pnl_inr, 2),
-        "total_pnl_pct": round(total_pnl_pct, 2),
-        "day_change_inr": round(day_change_inr, 2),
-        "day_change_pct": round(day_change_pct, 2),
+        "total_networth_inr": round(total_networth if total_networth > 0 else total_portfolio, 2),
         "bank_inr": round(bank_inr, 2),
         "epf_inr": round(epf_inr, 2),
-        "non_investment_inr": round(bank_inr + epf_inr, 2)
+        "non_investment_inr": round(bank_inr + epf_inr, 2),
+        "invested_inr": round(portfolio_invested, 2),
+        "total_pnl_inr": round(total_pnl, 2),
+        "total_pnl_pct": round(total_pnl_pct, 2),
+        "day_change_inr": round(day_change_inr, 2),
+        "day_change_pct": round(day_change_pct, 2)
     }
 
 
-def normalize_allocation(raw_alloc: Any, total_portfolio: float = 0.0, total_networth: float = 0.0) -> list[dict[str, Any]]:
-    raw_alloc = _parse_json_if_str(raw_alloc)
-    items: list[dict[str, Any]] = []
-    effective_total = total_portfolio if total_portfolio > 0 else total_networth
-
+def normalize_allocation(raw_allocation: Any, effective_total: float) -> list[dict[str, Any]]:
+    raw_allocation = _parse_json_if_str(raw_allocation)
     alloc_list = []
-    if isinstance(raw_alloc, list):
-        alloc_list = raw_alloc
-    elif isinstance(raw_alloc, dict):
-        if "assets" in raw_alloc and isinstance(raw_alloc["assets"], list):
-            alloc_list = raw_alloc["assets"]
-        elif "investments" in raw_alloc and isinstance(raw_alloc["investments"], list):
-            alloc_list = raw_alloc["investments"]
-        elif "allocations" in raw_alloc and isinstance(raw_alloc["allocations"], list):
-            alloc_list = raw_alloc["allocations"]
-        else:
-            for k, v in raw_alloc.items():
-                if isinstance(v, dict):
-                    alloc_list.append({"asset": k, **v})
-                else:
-                    alloc_list.append({"asset": k, "value": v})
+    if isinstance(raw_allocation, list):
+        alloc_list = raw_allocation
+    elif isinstance(raw_allocation, dict):
+        alloc_list = raw_allocation.get("allocation") or raw_allocation.get("assets") or raw_allocation.get("items") or []
 
+    items = []
     for item in alloc_list:
         if not isinstance(item, dict):
             continue
-        name = (
-            item.get("assetclass_l2")
-            or item.get("asset")
-            or item.get("asset_type")
+        name = str(
+            item.get("asset")
+            or item.get("assetclass_l2")
+            or item.get("asset_class")
             or item.get("name")
             or item.get("category")
             or "Other"
@@ -310,6 +321,17 @@ def normalize_holdings(raw_holdings: Any) -> tuple[list[dict[str, Any]], list[di
         if total_pct == 0.0 and invested > 0 and val > 0:
             total_pct = round(((val - invested) / invested) * 100.0, 2)
 
+        # 1D Rupee Attribution
+        day_change_inr = _safe_float(
+            h.get("day_change_inr")
+            or h.get("day_change")
+            or h.get("one_day_return")
+            or h.get("day_pnl")
+        )
+        if day_change_inr == 0.0 and day_pct != 0.0 and val > 0:
+            if (100.0 + day_pct) > 0:
+                day_change_inr = round(val * (day_pct / (100.0 + day_pct)), 2)
+
         if val > 0 or invested > 0:
             normalized_all.append({
                 "symbol": symbol,
@@ -318,6 +340,7 @@ def normalize_holdings(raw_holdings: Any) -> tuple[list[dict[str, Any]], list[di
                 "value_inr": round(val, 2),
                 "invested_inr": round(invested, 2),
                 "day_pct": round(day_pct, 2),
+                "day_change_inr": round(day_change_inr, 2),
                 "total_pct": round(total_pct, 2)
             })
 
@@ -330,7 +353,13 @@ def normalize_holdings(raw_holdings: Any) -> tuple[list[dict[str, Any]], list[di
     return normalized_all, movers
 
 
-def normalize_sips(raw_mf_sips: Any, raw_in_sips: Any, raw_us_sips: Any) -> dict[str, Any]:
+def normalize_sips(
+    raw_mf_sips: Any,
+    raw_in_sips: Any,
+    raw_us_sips: Any,
+    bank_balance_inr: float = 0.0,
+    reference_date: datetime.date | None = None
+) -> dict[str, Any]:
     all_sips: list[dict[str, Any]] = []
 
     def _collect(sips: Any, sip_type: str) -> None:
@@ -376,9 +405,37 @@ def normalize_sips(raw_mf_sips: Any, raw_in_sips: Any, raw_us_sips: Any) -> dict
     monthly_total = sum(s["amount_inr"] for s in all_sips)
     all_sips.sort(key=lambda s: s["next_date"] or "9999-99-99")
 
+    # 7-Day Liquidity Coverage Calculation
+    today = reference_date or datetime.date.today()
+    next_7d_sip_inr = 0.0
+
+    for s in all_sips:
+        date_str = str(s.get("next_date", "")).strip()
+        if date_str:
+            try:
+                # Handle YYYY-MM-DD or DD-MM-YYYY
+                clean_date = date_str.split("T")[0]
+                if "-" in clean_date:
+                    parts = clean_date.split("-")
+                    if len(parts) == 3:
+                        if len(parts[0]) == 4:
+                            sip_date = datetime.date(int(parts[0]), int(parts[1]), int(parts[2]))
+                        else:
+                            sip_date = datetime.date(int(parts[2]), int(parts[1]), int(parts[0]))
+                        diff_days = (sip_date - today).days
+                        if 0 <= diff_days <= 7:
+                            next_7d_sip_inr += s["amount_inr"]
+            except Exception:
+                pass
+
+    # Coverage OK if bank balance >= 1.2 * next_7d_sip_inr (or no upcoming SIPs in 7 days)
+    sip_coverage_ok = (bank_balance_inr >= next_7d_sip_inr * 1.2) if next_7d_sip_inr > 0 else True
+
     return {
         "monthly_total_inr": round(monthly_total, 2),
         "active_count": len(all_sips),
+        "next_7d_sip_inr": round(next_7d_sip_inr, 2),
+        "sip_coverage_ok": bool(sip_coverage_ok),
         "upcoming": all_sips[:10]
     }
 
@@ -390,6 +447,7 @@ def build_normalized_state(
     mf_sips: Any = None,
     in_sips: Any = None,
     us_sips: Any = None,
+    prev_sparkline: list[dict[str, Any]] | None = None,
     status: str = "ok",
     auth_error: str | None = None
 ) -> dict[str, Any]:
@@ -402,16 +460,30 @@ def build_normalized_state(
 
     alloc_items = normalize_allocation(allocation, summary["total_networth_inr"])
     all_holdings, top_movers = normalize_holdings(holdings)
-    sips_data = normalize_sips(mf_sips, in_sips, us_sips)
+    sips_data = normalize_sips(
+        raw_mf_sips=mf_sips,
+        raw_in_sips=in_sips,
+        raw_us_sips=us_sips,
+        bank_balance_inr=summary["bank_inr"]
+    )
+
+    updated_at = int(time.time())
+    sparkline = update_sparkline(
+        prev_sparkline=prev_sparkline,
+        current_val=summary["total_networth_inr"],
+        current_ts=updated_at,
+        max_points=30
+    )
 
     return {
         "status": status,
-        "updated_at": int(time.time()),
+        "updated_at": updated_at,
         "market_state": get_market_state(),
         "auth_error": auth_error,
         "summary": summary,
         "allocation": alloc_items,
         "top_movers": top_movers,
         "holdings": all_holdings,
-        "sips": sips_data
+        "sips": sips_data,
+        "sparkline": sparkline
     }

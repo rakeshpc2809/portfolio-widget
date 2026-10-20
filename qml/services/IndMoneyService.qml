@@ -15,8 +15,8 @@ Singleton {
     readonly property string syncBin: Directories.homePath + "/.local/bin/indmoney-sync"
 
     property bool ready: false
-    property string status: "offline" // "ok", "syncing", "auth_required", "offline", "error"
-    property string marketState: "CLOSED" // "IN_OPEN", "US_OPEN", "CLOSED"
+    property string status: "offline" // "ok", "syncing", "auth_required", "offline", "error", "cached"
+    property string marketState: "CLOSED" // "IN_OPEN", "US_OPEN", "CLOSED", "CACHED"
     property string authError: ""
     property double lastUpdated: 0
 
@@ -39,8 +39,11 @@ Singleton {
     property var sips: ({
         monthly_total_inr: 0,
         active_count: 0,
+        next_7d_sip_inr: 0,
+        sip_coverage_ok: true,
         upcoming: []
     })
+    property var sparkline: []
 
     property bool privacyMode: false
     readonly property bool syncing: syncProc.running
@@ -79,6 +82,20 @@ Singleton {
         }
     }
 
+    // Process lifetime guard: abort if process does not finish within 30 seconds
+    Timer {
+        id: syncTimeoutGuard
+        interval: 30000
+        repeat: false
+        running: syncProc.running
+        onTriggered: {
+            if (syncProc.running) {
+                console.warn("[IndMoneyService] Sync process timed out after 30s, resetting state.")
+                syncProc.running = false
+            }
+        }
+    }
+
     function refresh(): void {
         if (!syncProc.running) {
             syncProc.running = true
@@ -109,6 +126,7 @@ Singleton {
             if (Array.isArray(data.top_movers)) root.topMovers = data.top_movers
             if (Array.isArray(data.holdings)) root.holdings = data.holdings
             if (data.sips) root.sips = data.sips
+            if (Array.isArray(data.sparkline)) root.sparkline = data.sparkline
 
             root.ready = true
         } catch (e) {

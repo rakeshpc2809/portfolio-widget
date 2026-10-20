@@ -1,4 +1,4 @@
-.PHONY: all test install auth inspect fetch mock status clean
+.PHONY: all test install auth inspect fetch mock status hydrate clean
 
 all: test
 
@@ -13,6 +13,9 @@ auth:
 
 inspect:
 	./src/indmoney-sync inspect
+
+hydrate:
+	./src/indmoney-sync hydrate
 
 fetch:
 	./src/indmoney-sync fetch --force -v

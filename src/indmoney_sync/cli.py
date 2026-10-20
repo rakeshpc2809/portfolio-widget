@@ -1,4 +1,4 @@
-"""Command-line interface for IndMoney sync worker."""
+"""CLI entrypoint for IndMoney MCP synchronizer."""
 import argparse
 import json
 import os
@@ -21,16 +21,15 @@ from .inspector import run_inspect
 from .mock_data import get_mock_state
 from .normalizer import build_normalized_state
 
-# File paths
+MCP_ENDPOINT = "https://mcp.indmoney.com/mcp"
+
 RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "inir-indmoney"
+CACHE_DIR = Path.home() / ".cache" / "inir" / "indmoney"
+
 STATE_FILE = RUNTIME_DIR / "state.json"
 STATE_TMP_FILE = RUNTIME_DIR / "state.json.tmp"
-
-CACHE_DIR = Path.home() / ".cache" / "inir" / "indmoney"
 LAST_GOOD_FILE = CACHE_DIR / "last_good.json"
 SIPS_CACHE_FILE = CACHE_DIR / "sips_cache.json"
-
-MCP_ENDPOINT = "https://mcp.indmoney.com/mcp"
 
 
 def ensure_dirs() -> None:
@@ -52,6 +51,31 @@ def write_atomic_state(payload: dict[str, Any]) -> None:
             json.dump(payload, f, indent=2)
 
 
+def hydrate_state() -> bool:
+    """
+    Cold-boot tmpfs hydration:
+    If state.json does not exist in tmpfs, but last_good.json exists in persistent cache,
+    atomically copies last_good.json to state.json with "market_state": "CACHED".
+    Returns True if hydration was performed.
+    """
+    if STATE_FILE.exists():
+        return False
+
+    if not LAST_GOOD_FILE.exists():
+        return False
+
+    try:
+        with open(LAST_GOOD_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        data["market_state"] = "CACHED"
+        write_atomic_state(data)
+        return True
+    except Exception as e:
+        print(f"[indmoney-sync] Hydration failed: {e}", file=sys.stderr)
+        return False
+
+
 def notify_user(title: str, message: str, urgency: str = "normal") -> None:
     try:
         subprocess.run(
@@ -71,6 +95,19 @@ def get_cached_or_default_state() -> dict[str, Any]:
         except Exception:
             pass
     return get_mock_state()
+
+
+def cmd_hydrate(args: argparse.Namespace) -> int:
+    ensure_dirs()
+    hydrated = hydrate_state()
+    if hydrated:
+        print(f"[indmoney-sync] Hydrated {STATE_FILE} from {LAST_GOOD_FILE} (market_state: CACHED)")
+    else:
+        if STATE_FILE.exists():
+            print(f"[indmoney-sync] State file already exists at {STATE_FILE}, skipping hydration.")
+        else:
+            print(f"[indmoney-sync] No cached state found at {LAST_GOOD_FILE}.")
+    return 0
 
 
 def cmd_auth(args: argparse.Namespace) -> int:
@@ -107,6 +144,12 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     ensure_dirs()
     force = getattr(args, "force", False)
     verbose = getattr(args, "verbose", False)
+
+    # Auto-hydrate on cold boot before any network activity
+    if not STATE_FILE.exists():
+        hydrated = hydrate_state()
+        if hydrated and verbose:
+            print("[indmoney-sync] Cold boot detected: pre-hydrated state.json from cache.")
 
     # Check last fetch timestamp
     last_fetch_ts = 0.0
@@ -181,21 +224,21 @@ def cmd_fetch(args: argparse.Namespace) -> int:
                     if verbose:
                         print(f"[indmoney-sync] Warning fetching {asset_type} holdings: {e}")
 
-
             # Slow tier tools (SIPs) - cache for 6 hours
             now = time.time()
             sips_cached = None
             if SIPS_CACHE_FILE.exists():
                 try:
-                    if now - SIPS_CACHE_FILE.stat().st_mtime < 6 * 3600:
+                    mtime = SIPS_CACHE_FILE.stat().st_mtime
+                    if (now - mtime) < (6 * 3600) and not force:
                         with open(SIPS_CACHE_FILE, "r", encoding="utf-8") as f:
                             sips_cached = json.load(f)
                 except Exception:
                     pass
 
-            if not sips_cached or force:
+            if not sips_cached:
                 if verbose:
-                    print("[indmoney-sync] Fetching SIPs (slow tier)...")
+                    print("[indmoney-sync] Fetching slow-tier tools (SIPs)...")
                 try:
                     mf_sips = client.call_tool("mf_sips")
                 except Exception:
@@ -217,6 +260,18 @@ def cmd_fetch(args: argparse.Namespace) -> int:
                 with open(SIPS_CACHE_FILE, "w", encoding="utf-8") as f:
                     json.dump(sips_cached, f)
 
+            # Retrieve previous sparkline ring buffer from state or cache
+            prev_sparkline = []
+            source_file = STATE_FILE if STATE_FILE.exists() else LAST_GOOD_FILE
+            if source_file.exists():
+                try:
+                    with open(source_file, "r", encoding="utf-8") as f:
+                        prev_data = json.load(f)
+                        if isinstance(prev_data.get("sparkline"), list):
+                            prev_sparkline = prev_data["sparkline"]
+                except Exception:
+                    pass
+
             state = build_normalized_state(
                 snapshot=snapshot,
                 allocation=allocation,
@@ -224,6 +279,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
                 mf_sips=sips_cached.get("mf"),
                 in_sips=sips_cached.get("in"),
                 us_sips=sips_cached.get("us"),
+                prev_sparkline=prev_sparkline,
                 status="ok"
             )
 
@@ -258,26 +314,28 @@ def cmd_status(args: argparse.Namespace) -> int:
     market = get_market_state()
 
     print("=== IndMoney Sync Status ===")
-    print("Keyring Service: inir-indmoney-mcp")
-    print(f"Authenticated:   {'YES' if has_token else 'NO'}")
+    print(f"Keyring Tokens:    {'Configured' if has_token else 'Missing'}")
     if has_token:
-        exp_in = int((tokens.get("expires_at", 0) - time.time()) / 60)
-        print(f"Token Expiry:    in {exp_in} minutes ({'EXPIRED' if expired else 'VALID'})")
-        print(f"Client ID:       {tokens.get('client_id')}")
-    print(f"Market Window:   {market}")
-    print(f"State File:      {STATE_FILE} ({'EXISTS' if STATE_FILE.exists() else 'MISSING'})")
-    print(f"Cache File:      {LAST_GOOD_FILE} ({'EXISTS' if LAST_GOOD_FILE.exists() else 'MISSING'})")
+        print(f"Token Validity:    {'Expired (needs refresh)' if expired else 'Active'}")
+    print(f"Market State:      {market}")
 
     if STATE_FILE.exists():
         try:
-            with open(STATE_FILE, "r") as f:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             s = data.get("summary", {})
-            print(f"Current Networth: ₹{s.get('total_networth_inr', 0):,.2f}")
+            print(f"Last State File:   {STATE_FILE}")
+            print(f"Updated At:        {time.ctime(data.get('updated_at', 0))}")
+            print(f"Total Net Worth:   ₹{s.get('total_networth_inr', 0):,.2f}")
+            print(f"Total Invested:    ₹{s.get('invested_inr', 0):,.2f}")
             print(f"1D Change:        ₹{s.get('day_change_inr', 0):,.2f} ({s.get('day_change_pct', 0)}%)")
             print(f"Status:           {data.get('status')}")
+            spark_len = len(data.get("sparkline", []))
+            print(f"Sparkline Points: {spark_len}/30")
         except Exception as e:
             print(f"Error reading state file: {e}")
+    else:
+        print(f"State File:        Not found at {STATE_FILE}")
 
     return 0
 
@@ -291,6 +349,9 @@ def main() -> int:
 
     # inspect
     subparsers.add_parser("inspect", help="Inspect and sample MCP tool schemas")
+
+    # hydrate
+    subparsers.add_parser("hydrate", help="Cold-boot tmpfs hydration from persistent cache")
 
     # fetch
     fetch_parser = subparsers.add_parser("fetch", help="Headless sync worker")
@@ -309,6 +370,8 @@ def main() -> int:
         return cmd_auth(args)
     elif args.command == "inspect":
         return cmd_inspect(args)
+    elif args.command == "hydrate":
+        return cmd_hydrate(args)
     elif args.command == "fetch":
         return cmd_fetch(args)
     elif args.command == "mock":
