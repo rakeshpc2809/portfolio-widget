@@ -169,6 +169,27 @@ class TestGovernor(unittest.TestCase):
             self.assertEqual(get_nominal_market_state(thanksgiving_2028), "CLOSED")
             self.assertEqual(get_market_state(thanksgiving_2028), "CLOSED")
 
+    def test_opening_bell_window_transition_resets_streak_and_fetches(self):
+        """
+        If unchanged_streak >= 2 from a previous market/off-hours session,
+        transitioning into a new active window (e.g. CLOSED -> IN_OPEN at 09:15 IST)
+        must reset the streak and immediately trigger an opening-bell fetch.
+        """
+        # Previous off-hours fetch at 08:45 IST (nominal CLOSED) with streak=5
+        prev_fetch_dt = datetime.datetime(2026, 10, 20, 8, 45, tzinfo=IST)
+        prev_fetch_ts = prev_fetch_dt.timestamp()
+
+        # Morning bell at 09:15 IST (nominal IN_OPEN) - only 30m after last fetch
+        open_dt = datetime.datetime(2026, 10, 20, 9, 15, tzinfo=IST)
+        open_ts = open_dt.timestamp()
+
+        state = {"updated_at": prev_fetch_ts, "unchanged_streak": 5}
+        should_run, reason, m_state = should_fetch(state=state, force=False, now=open_ts)
+
+        self.assertTrue(should_run, "Opening bell must trigger an immediate fetch")
+        self.assertEqual(m_state, "IN_OPEN")
+        self.assertIn("opening bell", reason.lower())
+
     def test_force_always_fetches(self):
         should_run, reason, _ = should_execute_fetch(last_fetch_ts=10000000000, force=True)
         self.assertTrue(should_run)

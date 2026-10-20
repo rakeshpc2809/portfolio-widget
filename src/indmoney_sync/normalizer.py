@@ -4,7 +4,7 @@ import json
 import time
 from typing import Any
 
-from .governor import get_market_state, get_nominal_market_state
+from .governor import IST, get_market_state, get_nominal_market_state
 
 ASSET_COLORS = {
     "Equity": "#38bdf8",         # Sky
@@ -486,11 +486,22 @@ def build_normalized_state(
         prev_summary = prev_state.get("summary", {})
         prev_networth = _safe_float(prev_summary.get("total_networth_inr"))
         prev_day_change = _safe_float(prev_summary.get("day_change_inr"))
+        prev_updated_at = _safe_float(prev_state.get("updated_at", 0))
 
         curr_networth = summary["total_networth_inr"]
         curr_day_change = summary["day_change_inr"]
 
         nominal_state = get_nominal_market_state()
+        prev_nominal = (
+            get_nominal_market_state(datetime.datetime.fromtimestamp(prev_updated_at, tz=IST))
+            if prev_updated_at > 0
+            else nominal_state
+        )
+
+        # Reset streak if nominal market window transitioned (e.g. CLOSED -> IN_OPEN)
+        if prev_nominal != nominal_state:
+            prev_streak = 0
+
         if nominal_state in ("IN_OPEN", "US_OPEN"):
             # If values are identical during active hours, increment streak
             if abs(curr_networth - prev_networth) < 0.01 and abs(curr_day_change - prev_day_change) < 0.01:

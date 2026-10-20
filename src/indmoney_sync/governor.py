@@ -130,6 +130,19 @@ def should_fetch(
             last_fetch_ts = float(state["updated_at"])
 
     nominal_state = get_nominal_market_state(now_ist)
+
+    # Check nominal window transition from previous sync (e.g. CLOSED -> IN_OPEN)
+    window_transition_bell = False
+    prev_nominal = None
+    if last_fetch_ts > 0:
+        prev_ist = datetime.datetime.fromtimestamp(last_fetch_ts, tz=IST)
+        prev_nominal = get_nominal_market_state(prev_ist)
+        if prev_nominal != nominal_state:
+            unchanged_streak = 0
+            # If entering an active market window, schedule immediate opening bell sync
+            if nominal_state in ("IN_OPEN", "US_OPEN"):
+                window_transition_bell = True
+
     market_state = get_market_state(now_ist, unchanged_streak=unchanged_streak)
 
     if force:
@@ -137,6 +150,9 @@ def should_fetch(
 
     if last_fetch_ts <= 0:
         return True, "initial fetch / no previous cache", market_state
+
+    if window_transition_bell:
+        return True, f"opening bell window transition ({prev_nominal} -> {nominal_state})", nominal_state
 
     age_sec = now - last_fetch_ts
 

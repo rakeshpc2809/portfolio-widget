@@ -168,6 +168,35 @@ class TestNormalizer(unittest.TestCase):
             self.assertEqual(state_changed["market_state"], "IN_OPEN")
 
 
+    def test_build_normalized_state_window_transition_resets_streak(self):
+        from unittest.mock import patch
+        raw = {"total_networth": 1000000.0, "invested": 800000.0, "day_change": 5000.0, "day_change_pct": 0.5}
+
+        # Previous state was recorded at 08:45 IST (nominal CLOSED) with streak=5
+        prev_dt = datetime.datetime(2026, 10, 20, 8, 45, tzinfo=datetime.timezone(datetime.timedelta(hours=5, minutes=30)))
+        prev_state = {
+            "updated_at": prev_dt.timestamp(),
+            "unchanged_streak": 5,
+            "summary": {"total_networth_inr": 1000000.0, "day_change_inr": 5000.0}
+        }
+
+        # Now at 09:15 IST (nominal IN_OPEN)
+        with patch("indmoney_sync.normalizer.get_nominal_market_state") as mock_nom:
+            # First call for prev_updated_at returns CLOSED, second call for now returns IN_OPEN
+            def side_effect(dt=None):
+                if dt is not None and dt.hour == 8:
+                    return "CLOSED"
+                return "IN_OPEN"
+            mock_nom.side_effect = side_effect
+
+            state = build_normalized_state(snapshot=raw, allocation=[], holdings=[], prev_state=prev_state)
+            # Even with same values, streak reset from 5 -> 0, then incremented to 1 (first tick of new window)
+            self.assertEqual(state["unchanged_streak"], 1)
+            # Since streak is 1 (< 2), market_state is active IN_OPEN, NOT throttled
+            self.assertEqual(state["market_state"], "IN_OPEN")
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
