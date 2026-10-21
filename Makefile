@@ -1,12 +1,18 @@
-.PHONY: all test install auth inspect fetch mock status hydrate clean
+.PHONY: all test lint install uninstall auth inspect fetch mock status hydrate clean
 
-all: test
+all: lint test
 
 test:
-	python3 -m unittest discover -s tests
+	pytest -v
+
+lint:
+	ruff check .
 
 install:
 	bash install.sh
+
+uninstall:
+	bash install.sh --uninstall
 
 auth:
 	./src/indmoney-sync auth
@@ -27,4 +33,4 @@ status:
 	./src/indmoney-sync status
 
 clean:
-	rm -rf __pycache__ src/indmoney_sync/__pycache__ tests/__pycache__
+	rm -rf __pycache__ src/indmoney_sync/__pycache__ tests/__pycache__ .pytest_cache
