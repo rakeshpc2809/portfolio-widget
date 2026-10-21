@@ -11,6 +11,7 @@ DEFAULT_CONFIG_PATH = Path.home() / ".config" / "inir" / "indmoney" / "config.to
 
 @dataclass
 class BucketTargets:
+    enabled: bool = False
     core: float = 50.0
     satellite: float = 30.0
     gold_silver: float = 10.0
@@ -105,6 +106,7 @@ def load_config(config_path: Path | str | None = None) -> AppConfig:
     # Parse bucket targets
     raw_targets = data.get("targets", {}) or data.get("buckets", {})
     bucket_targets = BucketTargets(
+        enabled=bool(raw_targets.get("enabled", False)),
         core=float(raw_targets.get("core", raw_targets.get("Core", 50.0))),
         satellite=float(raw_targets.get("satellite", raw_targets.get("Satellite", 30.0))),
         gold_silver=float(raw_targets.get("gold_silver", raw_targets.get("Gold_Silver", 10.0))),

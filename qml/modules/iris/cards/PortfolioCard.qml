@@ -26,14 +26,32 @@ ColumnLayout {
     readonly property bool isDayGain: dayPct >= 0
     readonly property bool isTotalGain: totalReturnInr >= 0
 
-    property bool drillDownOpen: false
-    property string drillDownTab: "holdings" // "holdings", "sips"
-    property string holdingFilter: "ALL" // "ALL", "core", "satellite", "gold_silver", "liquid", "legacy"
+    // Theme-resilient contrast tokens using dynamic IrisStyle palette
+    readonly property color fgMain: IrisStyle.text
+    readonly property color fgMuted: IrisStyle.subtext
+    readonly property color rowBg: IrisStyle.fillSecondary
+    readonly property color rowBgHover: IrisStyle.fillHover
+
+    // Dynamic asset class color mapping using IrisStyle.identity tokens
+    function getAssetColor(assetName: string): color {
+        const name = (assetName || "").toLowerCase()
+        if (name.includes("mutual") || name === "mf") return IrisStyle.identity.indigo
+        if (name.includes("us") || name === "us_eq") return IrisStyle.identity.teal
+        if (name.includes("indian") || name === "in_eq" || name.includes("stock") || name.includes("equity")) return IrisStyle.identity.sky
+        if (name.includes("fixed") || name.includes("fd") || name.includes("deposit") || name.includes("gold") || name === "gold") return IrisStyle.identity.yellow
+        if (name.includes("epf") || name.includes("retirement") || name.includes("other")) return IrisStyle.identity.orange
+        return IrisStyle.identity.teal
+    }
+
+    property int activeTab: 0 // 0: Top Movers, 1: Holdings, 2: SIPs, 3: Buckets (optional)
+    property string holdingFilter: "ALL" // "ALL", "MF", "IN_EQ", "US_EQ"
+    property string topMoversSort: "PCT" // "PCT" or "INR"
+    property var hoveredAlloc: null
     property var hoveredBucket: null
 
-    // Idle / OLED Care (M9): subtle opacity dimming on user inactivity
+    // Idle / OLED Care: subtle opacity dimming on user inactivity
     readonly property bool isUserIdle: (typeof ScreenTime !== "undefined" && ScreenTime?.userIdle) || false
-    opacity: isUserIdle ? 0.70 : 1.0
+    opacity: isUserIdle ? 0.75 : 1.0
     Behavior on opacity {
         NumberAnimation {
             duration: IrisStyle.duration(240)
@@ -61,21 +79,28 @@ ColumnLayout {
         onTapped: root.forceActiveFocus()
     }
 
-    // --- Keyboard Navigation (M7) ---
+    // --- Keyboard-First Navigation ---
     Keys.onPressed: event => {
-        if (event.key === Qt.Key_D) {
-            root.drillDownOpen = !root.drillDownOpen
-            event.accepted = true
-        } else if (event.key === Qt.Key_1) {
-            root.drillDownOpen = true
-            root.drillDownTab = "holdings"
+        if (event.key === Qt.Key_1) {
+            root.activeTab = 0
             event.accepted = true
         } else if (event.key === Qt.Key_2) {
-            root.drillDownOpen = true
-            root.drillDownTab = "sips"
+            root.activeTab = 1
             event.accepted = true
         } else if (event.key === Qt.Key_3) {
-            root.drillDownOpen = !root.drillDownOpen
+            root.activeTab = 2
+            event.accepted = true
+        } else if (event.key === Qt.Key_4 && IndMoneyService.bucketsEnabled) {
+            root.activeTab = 3
+            event.accepted = true
+        } else if (event.key === Qt.Key_Tab && root.activeTab === 1) {
+            const filters = ["ALL", "MF", "IN_EQ", "US_EQ"]
+            const idx = filters.indexOf(root.holdingFilter)
+            const nextIdx = (idx + 1) % filters.length
+            root.holdingFilter = filters[nextIdx]
+            event.accepted = true
+        } else if (event.key === Qt.Key_S && root.activeTab === 0) {
+            root.topMoversSort = (root.topMoversSort === "PCT" ? "INR" : "PCT")
             event.accepted = true
         } else if (event.key === Qt.Key_Q) {
             IndMoneyService.toggleQuietMode()
@@ -86,20 +111,36 @@ ColumnLayout {
         } else if (event.key === Qt.Key_R) {
             IndMoneyService.refresh()
             event.accepted = true
-        } else if (event.key === Qt.Key_Tab && root.drillDownOpen) {
-            if (root.drillDownTab === "holdings") {
-                const filters = ["ALL", "core", "satellite", "gold_silver", "liquid"]
-                const idx = filters.indexOf(root.holdingFilter)
-                const nextIdx = (idx + 1) % filters.length
-                root.holdingFilter = filters[nextIdx]
-            } else {
-                root.drillDownTab = "holdings"
-            }
-            event.accepted = true
         }
     }
 
-    // Helper for 90-day Sparkline Polyline (C11)
+    // Sorted Top Movers by % Change or ₹ Impact
+    readonly property var sortedTopMovers: {
+        const raw = IndMoneyService.topMovers && IndMoneyService.topMovers.length > 0
+            ? IndMoneyService.topMovers
+            : (IndMoneyService.holdings || []).slice().sort((a, b) => Math.abs(b.one_day_change_pct ?? b.day_pct ?? 0) - Math.abs(a.one_day_change_pct ?? a.day_pct ?? 0)).slice(0, 5)
+        const list = raw.slice()
+        if (root.topMoversSort === "INR") {
+            return list.sort((a, b) => Math.abs(b.one_day_change_inr ?? b.day_change_inr ?? 0) - Math.abs(a.one_day_change_inr ?? a.day_change_inr ?? 0))
+        } else {
+            return list.sort((a, b) => Math.abs(b.one_day_change_pct ?? b.day_pct ?? 0) - Math.abs(a.one_day_change_pct ?? a.day_pct ?? 0))
+        }
+    }
+
+    // Filtered Holdings
+    readonly property var filteredHoldings: {
+        const list = IndMoneyService.holdings || []
+        if (root.holdingFilter === "ALL") return list
+        return list.filter(h => {
+            const a = (h.asset || h.class_id || "").toUpperCase()
+            if (root.holdingFilter === "MF") return a === "MF"
+            if (root.holdingFilter === "IN_EQ") return a === "IN_EQ" || a === "STOCK" || a === "EQUITY"
+            if (root.holdingFilter === "US_EQ") return a === "US_EQ" || a === "US_STOCK"
+            return true
+        })
+    }
+
+    // Helper for 90-day Sparkline Polyline
     function generateSparklinePoints(pts: var, w: real, h: real): var {
         if (!pts || pts.length < 2) return { line: [], fill: [] }
         let minVal = pts[0].v
@@ -206,7 +247,7 @@ ColumnLayout {
         }
     }
 
-    // --- Hero Platter with 90-Day Sparkline (M1, C8, C11, F3, M9) ---
+    // --- Hero Platter with 90-Day Sparkline ---
     Rectangle {
         id: heroPlatter
         Layout.fillWidth: true
@@ -221,7 +262,7 @@ ColumnLayout {
             id: heroHover
         }
 
-        // 90-Day Daily Sparkline Shape (C11)
+        // 90-Day Daily Sparkline Shape
         Shape {
             id: sparklineShape
             anchors.fill: parent
@@ -278,7 +319,7 @@ ColumnLayout {
                 Layout.fillWidth: true
                 spacing: Math.round(8 * root.d)
 
-                // Primary Hero Figure: Basis Consistency with Pill (C8) + Privacy Crossfade (M8, V5)
+                // Primary Hero Figure with Privacy Crossfade
                 Item {
                     implicitWidth: Math.max(heroNumber.implicitWidth, heroMask.implicitWidth)
                     implicitHeight: Math.max(heroNumber.implicitHeight, heroMask.implicitHeight)
@@ -375,7 +416,7 @@ ColumnLayout {
                     .arg(IndMoneyService.formatInrCompact(root.bankVal, IndMoneyService.privacyMode))
                     .arg(IndMoneyService.formatInrCompact(root.epfVal, IndMoneyService.privacyMode))
                 font.pixelSize: IrisStyle.typeFootnote
-                color: IrisStyle.subtext
+                color: root.fgMuted
                 elide: Text.ElideRight
                 Layout.fillWidth: true
             }
@@ -386,388 +427,360 @@ ColumnLayout {
                     .arg(IndMoneyService.formatPct(root.totalReturnPct))
                     .arg(IndMoneyService.formatInrCompact(root.totalReturnInr, IndMoneyService.privacyMode))
                 font.pixelSize: IrisStyle.typeFootnote
-                color: root.isTotalGain ? IrisStyle.identity.teal : IrisStyle.subtext
+                color: root.isTotalGain ? IrisStyle.identity.teal : root.fgMuted
                 elide: Text.ElideRight
                 Layout.fillWidth: true
             }
         }
     }
 
-    // --- Bento Grid Container ---
+    // --- Proportional Asset Allocation Bar ---
     ColumnLayout {
         Layout.fillWidth: true
-        spacing: Math.round(10 * root.d)
+        spacing: Math.round(4 * root.d)
+        visible: (IndMoneyService.allocation || []).length > 0
 
-        // Tile 1 — Bucket Drift Strip (F1, M3, M4, V2)
-        Rectangle {
-            id: tile1
+        RowLayout {
             Layout.fillWidth: true
-            implicitHeight: bucketColumn.implicitHeight + Math.round(20 * root.d)
-            radius: IrisStyle.radiusCard
-            color: IrisStyle.surfaceHigh
-            border.color: IrisStyle.hairline
-            border.width: 1
 
-            // Staggered Entrance (M4): 0ms delay on entrance, OutCubic; faster InCubic exit
-            opacity: root.visible ? 1.0 : 0.0
-            Behavior on opacity {
-                SequentialAnimation {
-                    PauseAnimation { duration: (root.visible && IrisStyle.motionEnabled) ? 0 : 0 }
-                    NumberAnimation {
-                        duration: IrisStyle.duration(root.visible ? 160 : 90)
-                        easing.type: root.visible ? Easing.OutCubic : Easing.InCubic
-                    }
-                }
+            IrisText {
+                text: root.hoveredAlloc
+                    ? (root.hoveredAlloc.asset + ": " + IndMoneyService.formatInrCompact(root.hoveredAlloc.value_inr, IndMoneyService.privacyMode) + " (" + root.hoveredAlloc.weight_pct + "%)")
+                    : Translation.tr("Asset Allocation")
+                font.pixelSize: IrisStyle.typeMeta
+                color: root.hoveredAlloc ? IrisStyle.identity.teal : root.fgMuted
             }
+        }
 
-            ColumnLayout {
-                id: bucketColumn
-                anchors.fill: parent
-                anchors.margins: Math.round(12 * root.d)
-                spacing: Math.round(8 * root.d)
+        Row {
+            id: allocBar
+            Layout.fillWidth: true
+            height: Math.round(7 * root.d)
+            spacing: 2
 
-                RowLayout {
-                    Layout.fillWidth: true
-                    IrisText {
-                        text: Translation.tr("Asset Allocation & Target Drift")
-                        font.weight: IrisStyle.weight(Font.DemiBold)
-                        font.pixelSize: IrisStyle.typeFootnote
-                        color: IrisStyle.subtext
-                    }
-                    Item { Layout.fillWidth: true }
-                    IrisText {
-                        text: root.hoveredBucket
-                            ? Translation.tr("%1: %2 · Target %3% · Drift %4%")
-                                .arg(root.hoveredBucket.label)
-                                .arg(IndMoneyService.formatInrCompact(root.hoveredBucket.current_value_inr, IndMoneyService.privacyMode))
-                                .arg(root.hoveredBucket.target_pct)
-                                .arg(root.hoveredBucket.drift_pct > 0 ? "+" + root.hoveredBucket.drift_pct : root.hoveredBucket.drift_pct)
-                            : Translation.tr("Tolerance ±2.5%")
-                        font.pixelSize: Math.round(10 * root.d)
-                        color: root.hoveredBucket && !root.hoveredBucket.in_band ? IrisStyle.identity.orange : IrisStyle.muted
-                    }
-                }
+            Repeater {
+                model: IndMoneyService.allocation || []
 
-                Repeater {
-                    model: IndMoneyService.buckets
+                Rectangle {
+                    id: segRect
+                    required property var modelData
+                    width: Math.max(3, (allocBar.width - ((IndMoneyService.allocation.length - 1) * 2)) * (modelData.weight_pct / 100.0))
+                    height: segMouse.containsMouse ? Math.round(9 * root.d) : Math.round(5 * root.d)
+                    radius: 2.5
+                    color: root.getAssetColor(modelData.asset)
 
-                    delegate: Item {
-                        id: bucketRow
-                        required property var modelData
-                        required property int index
-
-                        Layout.fillWidth: true
-                        implicitHeight: Math.round(20 * root.d)
-
-                        readonly property bool inBand: modelData.in_band
-                        readonly property color baseColor: IrisStyle.identity[modelData.palette_key] ?? IrisStyle.identity.blue
-                        readonly property color barColor: inBand ? baseColor : IrisStyle.identity.orange
-
-                        HoverHandler {
-                            onHoveredChanged: {
-                                if (hovered) root.hoveredBucket = bucketRow.modelData
-                                else if (root.hoveredBucket === bucketRow.modelData) root.hoveredBucket = null
-                            }
+                    Behavior on height {
+                        SpringAnimation {
+                            spring: 3.5
+                            damping: 0.35
                         }
+                    }
 
-                        RowLayout {
-                            anchors.fill: parent
-                            spacing: Math.round(8 * root.d)
-
-                            IrisText {
-                                text: bucketRow.modelData.label
-                                font.pixelSize: Math.round(11 * root.d)
-                                font.weight: IrisStyle.weight(Font.Medium)
-                                color: bucketRow.barColor
-                                Layout.preferredWidth: Math.round(95 * root.d)
-                                elide: Text.ElideRight
-                            }
-
-                            // Bullet Bar Track with Tolerance Shading
-                            Rectangle {
-                                id: barTrack
-                                Layout.fillWidth: true
-                                implicitHeight: Math.round(8 * root.d)
-                                radius: IrisStyle.radiusMicro
-                                color: IrisStyle.fillQuiet
-
-                                // Target Tolerance Band (±2.5%) Shading
-                                Rectangle {
-                                    readonly property real tgt: bucketRow.modelData.target_pct
-                                    readonly property real minPct: Math.max(0, tgt - 2.5)
-                                    readonly property real maxPct: Math.min(100, tgt + 2.5)
-                                    x: (minPct / 100.0) * barTrack.width
-                                    width: Math.max(2, ((maxPct - minPct) / 100.0) * barTrack.width)
-                                    height: parent.height
-                                    radius: IrisStyle.radiusMicro
-                                    color: Qt.rgba(bucketRow.baseColor.r, bucketRow.baseColor.g, bucketRow.baseColor.b, 0.15)
-                                }
-
-                                // Actual Value Bar animated via IrisSpring (M3)
-                                Rectangle {
-                                    id: fillBar
-                                    height: parent.height
-                                    radius: IrisStyle.radiusMicro
-                                    color: bucketRow.barColor
-                                    width: Math.min(barTrack.width, Math.max(0, barSpring.value))
-
-                                    IrisSpring {
-                                        id: barSpring
-                                        property var springSpec: IrisStyle.springFor("standard", "card")
-                                        surface: "cards"
-                                        intent: "move"
-                                        animate: IrisStyle.motionEnabled && root.visible
-                                        to: (bucketRow.modelData.actual_pct / 100.0) * barTrack.width
-                                    }
-                                }
-
-                                // 2px Target Tick Marker Line
-                                Rectangle {
-                                    x: Math.min(barTrack.width - 2, Math.max(0, (bucketRow.modelData.target_pct / 100.0) * barTrack.width - 1))
-                                    y: -Math.round(2 * root.d)
-                                    width: 2
-                                    height: parent.height + Math.round(4 * root.d)
-                                    color: IrisStyle.text
-                                    radius: 1
-                                }
-                            }
-
-                            IrisText {
-                                text: bucketRow.modelData.actual_pct.toFixed(1) + "%"
-                                font.family: IrisStyle.fontNumbers
-                                font.pixelSize: Math.round(10 * root.d)
-                                font.weight: IrisStyle.weight(Font.DemiBold)
-                                font.features: ({ "tnum": 1 })
-                                color: bucketRow.barColor
-                                Layout.preferredWidth: Math.round(38 * root.d)
-                                horizontalAlignment: Text.AlignRight
-                            }
+                    MouseArea {
+                        id: segMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        onEntered: root.hoveredAlloc = segRect.modelData
+                        onExited: {
+                            if (root.hoveredAlloc === segRect.modelData) root.hoveredAlloc = null
                         }
                     }
                 }
             }
         }
+    }
 
-        // Tile 2 — Attention Feed (F2, C6, M4)
-        Rectangle {
-            id: tile2
+    // --- Native iRiS Segmented Tab Navigation ---
+    IrisSegmented {
+        Layout.fillWidth: true
+        options: {
+            const base = [
+                { value: 0, label: Translation.tr("Top Movers") },
+                { value: 1, label: Translation.tr("Holdings (%1)").arg((IndMoneyService.holdings || []).length) },
+                { value: 2, label: Translation.tr("SIPs (%1)").arg(IndMoneyService.sips.active_count ?? 0) }
+            ]
+            if (IndMoneyService.bucketsEnabled) {
+                base.push({ value: 3, label: Translation.tr("Buckets & Drift") })
+            }
+            return base
+        }
+        current: root.activeTab
+        onPicked: val => root.activeTab = val
+    }
+
+    // =========================================================================
+    // TAB 0: Top Movers (Daily Leaders with Rupee Impact Attribution)
+    // =========================================================================
+    ColumnLayout {
+        Layout.fillWidth: true
+        spacing: Math.round(5 * root.d)
+        visible: root.activeTab === 0
+
+        // Header Row with Sort Attribution Pill
+        RowLayout {
             Layout.fillWidth: true
-            implicitHeight: attentionColumn.implicitHeight + Math.round(20 * root.d)
-            radius: IrisStyle.radiusCard
-            color: IrisStyle.surfaceHigh
-            border.color: IrisStyle.hairline
-            border.width: 1
+            spacing: Math.round(6 * root.d)
 
-            // Staggered Entrance (M4): 40ms delay on entrance, OutCubic; faster InCubic exit
-            opacity: root.visible ? 1.0 : 0.0
-            Behavior on opacity {
-                SequentialAnimation {
-                    PauseAnimation { duration: (root.visible && IrisStyle.motionEnabled) ? 40 : 0 }
-                    NumberAnimation {
-                        duration: IrisStyle.duration(root.visible ? 160 : 90)
-                        easing.type: root.visible ? Easing.OutCubic : Easing.InCubic
-                    }
-                }
+            IrisText {
+                text: Translation.tr("Daily Leaders")
+                font.pixelSize: IrisStyle.typeMeta
+                color: root.fgMuted
             }
 
-            ColumnLayout {
-                id: attentionColumn
-                anchors.fill: parent
-                anchors.margins: Math.round(12 * root.d)
-                spacing: Math.round(6 * root.d)
+            Item { Layout.fillWidth: true }
+
+            Rectangle {
+                implicitWidth: sortRow.implicitWidth + Math.round(12 * root.d)
+                implicitHeight: Math.round(22 * root.d)
+                radius: height / 2
+                color: sortMouse.containsMouse ? IrisStyle.fillHover : root.rowBg
 
                 RowLayout {
-                    Layout.fillWidth: true
-                    IrisText {
-                        text: Translation.tr("Attention Feed")
-                        font.weight: IrisStyle.weight(Font.DemiBold)
-                        font.pixelSize: IrisStyle.typeFootnote
-                        color: IrisStyle.subtext
-                    }
-                    Item { Layout.fillWidth: true }
-                    IrisText {
-                        text: Translation.tr("%1 Active").arg(IndMoneyService.attentionItems.length)
-                        font.pixelSize: Math.round(10 * root.d)
-                        color: IndMoneyService.attentionItems.length > 0 ? IrisStyle.identity.orange : IrisStyle.identity.teal
-                    }
-                }
-
-                // Calm Empty State (Zero active alerts)
-                RowLayout {
-                    Layout.fillWidth: true
-                    visible: IndMoneyService.attentionItems.length === 0
-                    spacing: Math.round(6 * root.d)
+                    id: sortRow
+                    anchors.centerIn: parent
+                    spacing: Math.round(4 * root.d)
 
                     MaterialSymbol {
-                        text: "check_circle"
-                        iconSize: Math.round(14 * root.d)
+                        text: "sort"
+                        iconSize: Math.round(12 * root.d)
                         color: IrisStyle.identity.teal
                     }
 
                     IrisText {
-                        text: Translation.tr("All buckets in band · Nothing needs you")
-                        font.pixelSize: Math.round(11 * root.d)
-                        color: IrisStyle.subtext
+                        text: root.topMoversSort === "PCT" ? Translation.tr("Sort: % Change") : Translation.tr("Sort: ₹ Impact")
+                        font.pixelSize: Math.round(9.5 * root.d)
+                        font.weight: IrisStyle.weight(Font.Medium)
+                        color: IrisStyle.identity.teal
                     }
                 }
 
-                // Alert Items List
-                Repeater {
-                    model: IndMoneyService.attentionItems
+                MouseArea {
+                    id: sortMouse
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    hoverEnabled: true
+                    onClicked: root.topMoversSort = (root.topMoversSort === "PCT" ? "INR" : "PCT")
+                }
+            }
+        }
 
-                    delegate: RowLayout {
-                        id: alertRow
-                        required property var modelData
+        Repeater {
+            model: root.sortedTopMovers
+
+            delegate: Rectangle {
+                id: moverRow
+                required property var modelData
+                Layout.fillWidth: true
+                implicitHeight: Math.round(40 * root.d)
+                radius: IrisStyle.radiusTile
+                color: rowMouse.containsMouse ? root.rowBgHover : root.rowBg
+
+                MouseArea {
+                    id: rowMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                }
+
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: Math.round(10 * root.d)
+                    anchors.rightMargin: Math.round(10 * root.d)
+                    spacing: Math.round(8 * root.d)
+
+                    // Asset type accent stripe
+                    Rectangle {
+                        implicitWidth: Math.round(3 * root.d)
+                        implicitHeight: Math.round(22 * root.d)
+                        radius: 1.5
+                        color: root.getAssetColor(moverRow.modelData.asset || moverRow.modelData.class_id)
+                        Layout.alignment: Qt.AlignVCenter
+                    }
+
+                    ColumnLayout {
+                        spacing: 1
                         Layout.fillWidth: true
-                        spacing: Math.round(8 * root.d)
 
-                        readonly property color alertColor: IrisStyle.identity[modelData.palette_key] ?? IrisStyle.identity.orange
-
-                        Rectangle {
-                            implicitWidth: Math.round(6 * root.d)
-                            implicitHeight: Math.round(6 * root.d)
-                            radius: width / 2
-                            color: alertRow.alertColor
-                            Layout.alignment: Qt.AlignVCenter
+                        IrisText {
+                            text: moverRow.modelData.name
+                            font.pixelSize: IrisStyle.typeLabel
+                            font.weight: IrisStyle.weight(Font.Medium)
+                            color: root.fgMain
+                            elide: Text.ElideRight
+                            Layout.fillWidth: true
                         }
 
-                        ColumnLayout {
-                            Layout.fillWidth: true
-                            spacing: 1
+                        IrisText {
+                            text: (moverRow.modelData.asset || moverRow.modelData.class_id || "").toUpperCase() + " · " + IndMoneyService.formatInrCompact(moverRow.modelData.value_inr ?? moverRow.modelData.current_value_inr, IndMoneyService.privacyMode)
+                            font.pixelSize: IrisStyle.typeFootnote
+                            color: root.fgMuted
+                        }
+                    }
 
-                            IrisText {
-                                text: alertRow.modelData.title
-                                font.pixelSize: Math.round(11 * root.d)
-                                font.weight: IrisStyle.weight(Font.DemiBold)
-                                color: alertRow.alertColor
-                                elide: Text.ElideRight
-                                Layout.fillWidth: true
-                            }
+                    // Attribution Chip with Rupee Impact + Percentage Change
+                    Rectangle {
+                        readonly property real dayVal: moverRow.modelData.day_change_inr ?? moverRow.modelData.one_day_change_inr ?? 0
+                        readonly property real dayPctVal: moverRow.modelData.day_pct ?? moverRow.modelData.one_day_change_pct ?? 0
+                        implicitWidth: moverBadgeText.implicitWidth + Math.round(12 * root.d)
+                        implicitHeight: Math.round(22 * root.d)
+                        radius: 4
+                        color: dayPctVal >= 0 ? Qt.alpha(IrisStyle.identity.green, 0.15) : Qt.alpha(IrisStyle.identity.red, 0.15)
 
-                            IrisText {
-                                text: alertRow.modelData.message
-                                font.pixelSize: Math.round(10 * root.d)
-                                color: IrisStyle.subtext
-                                elide: Text.ElideRight
-                                Layout.fillWidth: true
-                            }
+                        IrisText {
+                            id: moverBadgeText
+                            anchors.centerIn: parent
+                            text: (parent.dayVal >= 0 ? "+" : "") + IndMoneyService.formatInrCompact(parent.dayVal, IndMoneyService.privacyMode) + " · " + IndMoneyService.formatPct(parent.dayPctVal)
+                            font.family: IrisStyle.fontNumbers
+                            font.pixelSize: Math.round(9.5 * root.d)
+                            font.weight: IrisStyle.weight(Font.Bold)
+                            font.features: ({ "tnum": 1 })
+                            color: parent.dayPctVal >= 0 ? IrisStyle.identity.green : IrisStyle.identity.red
                         }
                     }
                 }
             }
         }
+    }
 
-        // Tile 3 — Next SIP & Cash Buffer (F4, C1, C7, M4)
-        Rectangle {
-            id: tile3
+    // =========================================================================
+    // TAB 1: Holdings with High-Character Category Filtering & Badges
+    // =========================================================================
+    ColumnLayout {
+        Layout.fillWidth: true
+        spacing: Math.round(6 * root.d)
+        visible: root.activeTab === 1
+
+        // Category Filter Pills (Cycleable via Tab key)
+        RowLayout {
             Layout.fillWidth: true
-            implicitHeight: sipColumn.implicitHeight + Math.round(20 * root.d)
-            radius: IrisStyle.radiusCard
-            color: IrisStyle.surfaceHigh
-            border.color: IrisStyle.hairline
-            border.width: 1
+            spacing: Math.round(6 * root.d)
 
-            // Staggered Entrance (M4): 80ms delay on entrance, OutCubic; faster InCubic exit
-            opacity: root.visible ? 1.0 : 0.0
-            Behavior on opacity {
-                SequentialAnimation {
-                    PauseAnimation { duration: (root.visible && IrisStyle.motionEnabled) ? 80 : 0 }
-                    NumberAnimation {
-                        duration: IrisStyle.duration(root.visible ? 160 : 90)
-                        easing.type: root.visible ? Easing.OutCubic : Easing.InCubic
-                    }
-                }
-            }
+            Repeater {
+                model: [
+                    { label: "All", filter: "ALL" },
+                    { label: "Mutual Funds", filter: "MF" },
+                    { label: "Indian Stocks", filter: "IN_EQ" },
+                    { label: "US Stocks", filter: "US_EQ" }
+                ]
 
-            ColumnLayout {
-                id: sipColumn
-                anchors.fill: parent
-                anchors.margins: Math.round(12 * root.d)
-                spacing: Math.round(8 * root.d)
-
-                RowLayout {
-                    Layout.fillWidth: true
+                Rectangle {
+                    required property var modelData
+                    implicitWidth: filterText.implicitWidth + Math.round(14 * root.d)
+                    implicitHeight: Math.round(22 * root.d)
+                    radius: height / 2
+                    color: root.holdingFilter === modelData.filter ? IrisStyle.identity.teal : root.rowBg
 
                     IrisText {
-                        text: Translation.tr("Upcoming SIPs & Liquidity")
-                        font.weight: IrisStyle.weight(Font.DemiBold)
-                        font.pixelSize: IrisStyle.typeFootnote
-                        color: IrisStyle.subtext
+                        id: filterText
+                        anchors.centerIn: parent
+                        text: parent.modelData.label
+                        font.pixelSize: Math.round(9.5 * root.d)
+                        font.weight: IrisStyle.weight(Font.Medium)
+                        color: root.holdingFilter === parent.modelData.filter ? IrisStyle.onTint : root.fgMuted
                     }
 
-                    Item { Layout.fillWidth: true }
-
-                    // Liquidity Coverage Badge
-                    Rectangle {
-                        implicitHeight: Math.round(18 * root.d)
-                        implicitWidth: coverageText.implicitWidth + Math.round(10 * root.d)
-                        radius: IrisStyle.radiusChip
-                        color: IrisStyle.trackOf(IndMoneyService.sips.sip_coverage_ok ? IrisStyle.identity.teal : IrisStyle.identity.orange)
-                        border.color: IndMoneyService.sips.sip_coverage_ok ? IrisStyle.identity.teal : IrisStyle.identity.orange
-                        border.width: 1
-
-                        IrisText {
-                            id: coverageText
-                            anchors.centerIn: parent
-                            text: Translation.tr("%1x Coverage")
-                                .arg(IndMoneyService.sips.sip_coverage_ratio ?? 0)
-                            font.family: IrisStyle.fontNumbers
-                            font.pixelSize: Math.round(9 * root.d)
-                            font.weight: IrisStyle.weight(Font.DemiBold)
-                            color: IndMoneyService.sips.sip_coverage_ok ? IrisStyle.identity.teal : IrisStyle.identity.orange
-                        }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.holdingFilter = parent.modelData.filter
                     }
+                }
+            }
+        }
+
+        // Holdings List
+        ListView {
+            id: holdingsListView
+            Layout.fillWidth: true
+            implicitHeight: Math.min(Math.round(260 * root.d), contentHeight)
+            clip: true
+            spacing: Math.round(4 * root.d)
+
+            model: root.filteredHoldings
+
+            delegate: Rectangle {
+                id: hRow
+                required property var modelData
+                width: ListView.view.width
+                implicitHeight: Math.round(42 * root.d)
+                radius: IrisStyle.radiusTile
+                color: hMouse.containsMouse ? root.rowBgHover : root.rowBg
+
+                MouseArea {
+                    id: hMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
                 }
 
                 RowLayout {
-                    Layout.fillWidth: true
-                    spacing: Math.round(12 * root.d)
+                    anchors.fill: parent
+                    anchors.leftMargin: Math.round(10 * root.d)
+                    anchors.rightMargin: Math.round(10 * root.d)
+                    spacing: Math.round(8 * root.d)
+
+                    // Category Accent Color Stripe (Character & Visual Polish)
+                    Rectangle {
+                        implicitWidth: Math.round(3 * root.d)
+                        implicitHeight: Math.round(24 * root.d)
+                        radius: 1.5
+                        color: root.getAssetColor(hRow.modelData.asset || hRow.modelData.class_id)
+                        Layout.alignment: Qt.AlignVCenter
+                    }
 
                     ColumnLayout {
+                        spacing: 1
                         Layout.fillWidth: true
-                        spacing: 2
 
                         IrisText {
-                            text: IndMoneyService.sips.upcoming && IndMoneyService.sips.upcoming.length > 0
-                                ? IndMoneyService.sips.upcoming[0].name
-                                : Translation.tr("No Upcoming SIPs")
-                            font.pixelSize: Math.round(11 * root.d)
+                            text: hRow.modelData.name
+                            font.pixelSize: IrisStyle.typeLabel
                             font.weight: IrisStyle.weight(Font.Medium)
-                            color: IrisStyle.text
+                            color: root.fgMain
                             elide: Text.ElideRight
                             Layout.fillWidth: true
                         }
 
                         IrisText {
-                            text: IndMoneyService.sips.upcoming && IndMoneyService.sips.upcoming.length > 0
-                                ? Translation.tr("Next: %1 · %2")
-                                    .arg(IndMoneyService.sips.upcoming[0].next_date)
-                                    .arg(IndMoneyService.formatInrCompact(IndMoneyService.sips.upcoming[0].amount_inr, IndMoneyService.privacyMode))
-                                : Translation.tr("Monthly commitment: %1")
-                                    .arg(IndMoneyService.formatInrCompact(IndMoneyService.sips.monthly_total_inr, IndMoneyService.privacyMode))
-                            font.pixelSize: Math.round(10 * root.d)
-                            color: IrisStyle.subtext
-                            elide: Text.ElideRight
-                            Layout.fillWidth: true
+                            text: Translation.tr("Invested: %1 · %2")
+                                .arg(IndMoneyService.formatInrCompact(hRow.modelData.invested_inr ?? hRow.modelData.invested_value_inr, IndMoneyService.privacyMode))
+                                .arg((hRow.modelData.asset || hRow.modelData.class_id || "").toUpperCase())
+                            font.pixelSize: IrisStyle.typeFootnote
+                            color: root.fgMuted
                         }
                     }
 
                     ColumnLayout {
-                        spacing: 2
+                        spacing: 1
+                        Layout.alignment: Qt.AlignRight
+
                         IrisText {
-                            text: IndMoneyService.formatInrCompact(IndMoneyService.sips.next_7d_sip_inr, IndMoneyService.privacyMode)
+                            text: IndMoneyService.formatInrCompact(hRow.modelData.value_inr ?? hRow.modelData.current_value_inr, IndMoneyService.privacyMode)
                             font.family: IrisStyle.fontNumbers
-                            font.pixelSize: Math.round(12 * root.d)
+                            font.pixelSize: Math.round(11 * root.d)
                             font.weight: IrisStyle.weight(Font.Bold)
-                            color: IrisStyle.identity.teal
+                            font.features: ({ "tnum": 1 })
+                            color: root.fgMain
                             Layout.alignment: Qt.AlignRight
                         }
 
-                        IrisText {
-                            text: Translation.tr("Next 7 Days")
-                            font.pixelSize: Math.round(9 * root.d)
-                            color: IrisStyle.muted
+                        // Gain / Loss Chip Badge
+                        Rectangle {
+                            readonly property real returnPct: hRow.modelData.total_pct ?? hRow.modelData.total_return_pct ?? hRow.modelData.one_day_change_pct ?? 0
+                            implicitWidth: badgeText.implicitWidth + Math.round(8 * root.d)
+                            implicitHeight: Math.round(16 * root.d)
+                            radius: 3
+                            color: returnPct >= 0 ? Qt.alpha(IrisStyle.identity.green, 0.15) : Qt.alpha(IrisStyle.identity.red, 0.15)
                             Layout.alignment: Qt.AlignRight
+
+                            IrisText {
+                                id: badgeText
+                                anchors.centerIn: parent
+                                text: IndMoneyService.formatPct(parent.returnPct)
+                                font.family: IrisStyle.fontNumbers
+                                font.pixelSize: Math.round(9 * root.d)
+                                font.weight: IrisStyle.weight(Font.Bold)
+                                font.features: ({ "tnum": 1 })
+                                color: parent.returnPct >= 0 ? IrisStyle.identity.green : IrisStyle.identity.red
+                            }
                         }
                     }
                 }
@@ -775,226 +788,279 @@ ColumnLayout {
         }
     }
 
-    // --- Lazy-Loaded Drill-Down Drawer (V1, M8) ---
-    IrisButton {
+    // =========================================================================
+    // TAB 2: SIP Schedule & Liquidity
+    // =========================================================================
+    ColumnLayout {
         Layout.fillWidth: true
-        text: root.drillDownOpen
-            ? Translation.tr("Hide Details & Schedule (D)")
-            : Translation.tr("View Holdings & Schedule (D)")
-        buttonRadius: IrisStyle.radiusTile
-        quiet: true
-        onClicked: root.drillDownOpen = !root.drillDownOpen
-    }
+        spacing: Math.round(6 * root.d)
+        visible: root.activeTab === 2
 
-    Loader {
-        id: drillDownDrawer
-        Layout.fillWidth: true
-        active: root.visible && root.drillDownOpen
-        visible: active
+        // Monthly Commitment Card with Liquidity Coverage Badge
+        Rectangle {
+            Layout.fillWidth: true
+            implicitHeight: Math.round(50 * root.d)
+            radius: IrisStyle.radiusTile
+            color: root.rowBg
 
-        sourceComponent: Component {
-            Rectangle {
-                implicitHeight: drawerLayout.implicitHeight + Math.round(16 * root.d)
-                radius: IrisStyle.radiusPlate
-                color: IrisStyle.readingPlate
-                border.color: IrisStyle.hairline
-                border.width: 1
+            RowLayout {
+                anchors.fill: parent
+                anchors.margins: Math.round(10 * root.d)
 
                 ColumnLayout {
-                    id: drawerLayout
-                    anchors.fill: parent
-                    anchors.margins: Math.round(12 * root.d)
-                    spacing: Math.round(10 * root.d)
+                    spacing: 0
+                    IrisText {
+                        text: Translation.tr("Monthly Commitment")
+                        font.pixelSize: IrisStyle.typeFootnote
+                        color: root.fgMuted
+                    }
+                    IrisText {
+                        text: IndMoneyService.formatInrCompact(IndMoneyService.sips.monthly_total_inr ?? 0, IndMoneyService.privacyMode) + "/month"
+                        font.family: IrisStyle.fontNumbers
+                        font.pixelSize: Math.round(13 * root.d)
+                        font.weight: IrisStyle.weight(Font.Bold)
+                        font.features: ({ "tnum": 1 })
+                        color: IrisStyle.identity.teal
+                    }
+                }
 
-                    // Tab selector between Holdings and SIP Schedule
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: Math.round(6 * root.d)
+                Item { Layout.fillWidth: true }
 
-                        IrisButton {
-                            text: Translation.tr("Holdings (%1) [1]").arg((IndMoneyService.holdings || []).length)
-                            quiet: root.drillDownTab !== "holdings"
-                            buttonRadius: IrisStyle.radiusChip
-                            onClicked: root.drillDownTab = "holdings"
-                        }
+                ColumnLayout {
+                    spacing: Math.round(2 * root.d)
+                    Layout.alignment: Qt.AlignRight
 
-                        IrisButton {
-                            text: Translation.tr("SIP Schedule (%1) [2]").arg((IndMoneyService.sips.upcoming || []).length)
-                            quiet: root.drillDownTab !== "sips"
-                            buttonRadius: IrisStyle.radiusChip
-                            onClicked: root.drillDownTab = "sips"
-                        }
-
-                        Item { Layout.fillWidth: true }
+                    IrisText {
+                        text: Translation.tr("%1 Active SIPs").arg(IndMoneyService.sips.active_count ?? 0)
+                        font.pixelSize: IrisStyle.typeLabel
+                        font.weight: IrisStyle.weight(Font.Medium)
+                        color: root.fgMain
+                        Layout.alignment: Qt.AlignRight
                     }
 
-                    // --- VIEW 1: Holdings with Bucket Filters ---
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        visible: root.drillDownTab === "holdings"
-                        spacing: Math.round(8 * root.d)
+                    // 7-Day Liquidity Coverage Badge
+                    Rectangle {
+                        readonly property bool hasUpcoming: (IndMoneyService.sips.next_7d_sip_inr ?? 0) > 0
+                        readonly property bool covered: IndMoneyService.sips.sip_coverage_ok ?? true
+                        visible: hasUpcoming
+                        implicitWidth: covRow.implicitWidth + Math.round(8 * root.d)
+                        implicitHeight: Math.round(18 * root.d)
+                        radius: height / 2
+                        color: covered ? Qt.alpha(IrisStyle.identity.green, 0.15) : Qt.alpha(IrisStyle.identity.orange, 0.15)
+                        Layout.alignment: Qt.AlignRight
 
-                        // Bucket Filter Chips (Tab keyboard navigation)
                         RowLayout {
-                            Layout.fillWidth: true
-                            spacing: Math.round(6 * root.d)
+                            id: covRow
+                            anchors.centerIn: parent
+                            spacing: Math.round(3 * root.d)
 
-                            Repeater {
-                                model: ["ALL", "core", "satellite", "gold_silver", "liquid"]
-
-                                delegate: IrisButton {
-                                    required property string modelData
-                                    text: modelData === "ALL" ? "ALL" : modelData.toUpperCase()
-                                    quiet: root.holdingFilter !== modelData
-                                    buttonRadius: IrisStyle.radiusChip
-                                    onClicked: root.holdingFilter = modelData
-                                }
-                            }
-                        }
-
-                        // Holdings List
-                        ListView {
-                            id: holdingsList
-                            Layout.fillWidth: true
-                            implicitHeight: Math.min(Math.round(220 * root.d), contentHeight)
-                            clip: true
-                            spacing: Math.round(4 * root.d)
-
-                            model: {
-                                const raw = IndMoneyService.holdings || []
-                                if (root.holdingFilter === "ALL") return raw
-                                return raw.filter(h => h.bucket_id === root.holdingFilter)
+                            MaterialSymbol {
+                                text: parent.parent.covered ? "check_circle" : "warning"
+                                iconSize: Math.round(11 * root.d)
+                                color: parent.parent.covered ? IrisStyle.identity.green : IrisStyle.identity.orange
                             }
 
-                            delegate: Rectangle {
-                                id: holdingRow
-                                required property var modelData
-                                width: holdingsList.width
-                                implicitHeight: Math.round(38 * root.d)
-                                radius: IrisStyle.radiusRow
-                                color: holdingHover.hovered ? IrisStyle.fillHover : IrisStyle.fillQuiet
-
-                                HoverHandler { id: holdingHover }
-
-                                RowLayout {
-                                    anchors.fill: parent
-                                    anchors.margins: Math.round(8 * root.d)
-                                    spacing: Math.round(8 * root.d)
-
-                                    ColumnLayout {
-                                        Layout.fillWidth: true
-                                        spacing: 1
-
-                                        IrisText {
-                                            text: holdingRow.modelData.name
-                                            font.pixelSize: Math.round(11 * root.d)
-                                            font.weight: IrisStyle.weight(Font.Medium)
-                                            elide: Text.ElideRight
-                                            Layout.fillWidth: true
-                                        }
-
-                                        IrisText {
-                                            text: (holdingRow.modelData.symbol ?? "") + " · " + (holdingRow.modelData.bucket_id ?? "").toUpperCase()
-                                            font.pixelSize: Math.round(9 * root.d)
-                                            color: IrisStyle.muted
-                                        }
-                                    }
-
-                                    ColumnLayout {
-                                        spacing: 1
-
-                                        IrisText {
-                                            text: IndMoneyService.formatInrCompact(holdingRow.modelData.current_value_inr, IndMoneyService.privacyMode)
-                                            font.family: IrisStyle.fontNumbers
-                                            font.pixelSize: Math.round(11 * root.d)
-                                            font.weight: IrisStyle.weight(Font.Bold)
-                                            Layout.alignment: Qt.AlignRight
-                                        }
-
-                                        IrisText {
-                                            text: IndMoneyService.formatPct(holdingRow.modelData.one_day_change_pct)
-                                            font.family: IrisStyle.fontNumbers
-                                            font.pixelSize: Math.round(9 * root.d)
-                                            font.weight: IrisStyle.weight(Font.DemiBold)
-                                            color: (holdingRow.modelData.one_day_change_pct ?? 0) >= 0 ? IrisStyle.identity.green : IrisStyle.identity.red
-                                            Layout.alignment: Qt.AlignRight
-                                        }
-                                    }
-                                }
+                            IrisText {
+                                text: parent.parent.covered ? Translation.tr("7D Covered") : Translation.tr("Low Bank Buffer")
+                                font.pixelSize: Math.round(9 * root.d)
+                                font.weight: IrisStyle.weight(Font.DemiBold)
+                                color: parent.parent.covered ? IrisStyle.identity.green : IrisStyle.identity.orange
                             }
                         }
                     }
+                }
+            }
+        }
 
-                    // --- VIEW 2: Upcoming SIPs Schedule ---
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        visible: root.drillDownTab === "sips"
-                        spacing: Math.round(8 * root.d)
+        // Upcoming SIP list
+        ListView {
+            Layout.fillWidth: true
+            implicitHeight: Math.min(Math.round(200 * root.d), contentHeight)
+            clip: true
+            spacing: Math.round(4 * root.d)
 
-                        ListView {
-                            id: sipsList
-                            Layout.fillWidth: true
-                            implicitHeight: Math.min(Math.round(220 * root.d), contentHeight)
-                            clip: true
-                            spacing: Math.round(4 * root.d)
+            model: IndMoneyService.sips.upcoming ?? []
 
-                            model: IndMoneyService.sips.upcoming || []
+            delegate: Rectangle {
+                id: sipRow
+                required property var modelData
+                width: ListView.view.width
+                implicitHeight: Math.round(38 * root.d)
+                radius: IrisStyle.radiusTile
+                color: sipMouse.containsMouse ? root.rowBgHover : root.rowBg
 
-                            delegate: Rectangle {
-                                id: sipRow
-                                required property var modelData
-                                width: sipsList.width
-                                implicitHeight: Math.round(38 * root.d)
-                                radius: IrisStyle.radiusRow
-                                color: sipHover.hovered ? IrisStyle.fillHover : IrisStyle.fillQuiet
+                MouseArea {
+                    id: sipMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                }
 
-                                HoverHandler { id: sipHover }
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: Math.round(10 * root.d)
+                    anchors.rightMargin: Math.round(10 * root.d)
+                    spacing: Math.round(8 * root.d)
 
-                                RowLayout {
-                                    anchors.fill: parent
-                                    anchors.margins: Math.round(8 * root.d)
-                                    spacing: Math.round(8 * root.d)
+                    // Date Pill
+                    Rectangle {
+                        implicitWidth: Math.round(44 * root.d)
+                        implicitHeight: Math.round(20 * root.d)
+                        radius: 4
+                        color: IrisStyle.fillHover
 
-                                    ColumnLayout {
-                                        Layout.fillWidth: true
-                                        spacing: 1
-
-                                        IrisText {
-                                            text: sipRow.modelData.name
-                                            font.pixelSize: Math.round(11 * root.d)
-                                            font.weight: IrisStyle.weight(Font.Medium)
-                                            elide: Text.ElideRight
-                                            Layout.fillWidth: true
-                                        }
-
-                                        IrisText {
-                                            text: (sipRow.modelData.next_date ?? "") + " · " + (sipRow.modelData.frequency ?? "").toUpperCase() + " · " + (sipRow.modelData.class_id ?? "").toUpperCase()
-                                            font.pixelSize: Math.round(9 * root.d)
-                                            color: IrisStyle.muted
-                                        }
-                                    }
-
-                                    ColumnLayout {
-                                        spacing: 1
-
-                                        IrisText {
-                                            text: IndMoneyService.formatInrCompact(sipRow.modelData.amount_inr, IndMoneyService.privacyMode)
-                                            font.family: IrisStyle.fontNumbers
-                                            font.pixelSize: Math.round(11 * root.d)
-                                            font.weight: IrisStyle.weight(Font.Bold)
-                                            Layout.alignment: Qt.AlignRight
-                                        }
-
-                                        IrisText {
-                                            text: sipRow.modelData.amount_usd ? ("$" + sipRow.modelData.amount_usd.toFixed(2)) : Translation.tr("Auto-Debit")
-                                            font.pixelSize: Math.round(9 * root.d)
-                                            color: IrisStyle.subtext
-                                            Layout.alignment: Qt.AlignRight
-                                        }
-                                    }
-                                }
-                            }
+                        IrisText {
+                            anchors.centerIn: parent
+                            text: String(sipRow.modelData.next_date ?? "").slice(0, 5)
+                            font.family: IrisStyle.fontNumbers
+                            font.pixelSize: Math.round(9.5 * root.d)
+                            font.features: ({ "tnum": 1 })
+                            color: root.fgMain
                         }
+                    }
+
+                    // Scheme / Stock Name
+                    IrisText {
+                        text: sipRow.modelData.name
+                        font.pixelSize: IrisStyle.typeLabel
+                        color: root.fgMain
+                        elide: Text.ElideRight
+                        Layout.fillWidth: true
+                    }
+
+                    // Amount
+                    IrisText {
+                        text: IndMoneyService.formatInrCompact(sipRow.modelData.amount_inr, IndMoneyService.privacyMode)
+                        font.family: IrisStyle.fontNumbers
+                        font.pixelSize: Math.round(11 * root.d)
+                        font.weight: IrisStyle.weight(Font.Bold)
+                        font.features: ({ "tnum": 1 })
+                        color: root.fgMain
+                    }
+                }
+            }
+        }
+    }
+
+    // =========================================================================
+    // TAB 3: Buckets & Drift (Optional: Enabled when buckets.enabled = true)
+    // =========================================================================
+    ColumnLayout {
+        Layout.fillWidth: true
+        spacing: Math.round(8 * root.d)
+        visible: root.activeTab === 3 && IndMoneyService.bucketsEnabled
+
+        RowLayout {
+            Layout.fillWidth: true
+            IrisText {
+                text: Translation.tr("Asset Allocation & Target Drift")
+                font.weight: IrisStyle.weight(Font.DemiBold)
+                font.pixelSize: IrisStyle.typeFootnote
+                color: root.fgMuted
+            }
+            Item { Layout.fillWidth: true }
+            IrisText {
+                text: root.hoveredBucket
+                    ? Translation.tr("%1: %2 · Target %3% · Drift %4%")
+                        .arg(root.hoveredBucket.label)
+                        .arg(IndMoneyService.formatInrCompact(root.hoveredBucket.current_value_inr, IndMoneyService.privacyMode))
+                        .arg(root.hoveredBucket.target_pct)
+                        .arg(root.hoveredBucket.drift_pct > 0 ? "+" + root.hoveredBucket.drift_pct : root.hoveredBucket.drift_pct)
+                    : Translation.tr("Tolerance ±2.5%")
+                font.pixelSize: Math.round(10 * root.d)
+                color: root.hoveredBucket && !root.hoveredBucket.in_band ? IrisStyle.identity.orange : root.fgMuted
+            }
+        }
+
+        Repeater {
+            model: IndMoneyService.buckets
+
+            delegate: Rectangle {
+                id: bucketRow
+                required property var modelData
+                required property int index
+
+                Layout.fillWidth: true
+                implicitHeight: Math.round(36 * root.d)
+                radius: IrisStyle.radiusTile
+                color: bMouse.containsMouse ? root.rowBgHover : root.rowBg
+
+                readonly property bool inBand: modelData.in_band
+                readonly property color baseColor: IrisStyle.identity[modelData.palette_key] ?? IrisStyle.identity.blue
+                readonly property color barColor: inBand ? baseColor : IrisStyle.identity.orange
+
+                MouseArea {
+                    id: bMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    onEntered: root.hoveredBucket = bucketRow.modelData
+                    onExited: {
+                        if (root.hoveredBucket === bucketRow.modelData) root.hoveredBucket = null
+                    }
+                }
+
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: Math.round(10 * root.d)
+                    anchors.rightMargin: Math.round(10 * root.d)
+                    spacing: Math.round(8 * root.d)
+
+                    IrisText {
+                        text: bucketRow.modelData.label
+                        font.pixelSize: Math.round(11 * root.d)
+                        font.weight: IrisStyle.weight(Font.Medium)
+                        color: bucketRow.barColor
+                        Layout.preferredWidth: Math.round(95 * root.d)
+                        elide: Text.ElideRight
+                    }
+
+                    // Bullet Bar Track
+                    Rectangle {
+                        id: barTrack
+                        Layout.fillWidth: true
+                        implicitHeight: Math.round(8 * root.d)
+                        radius: 4
+                        color: IrisStyle.fillHover
+
+                        // Target Tolerance Band
+                        Rectangle {
+                            readonly property real tgt: bucketRow.modelData.target_pct
+                            readonly property real minPct: Math.max(0, tgt - 2.5)
+                            readonly property real maxPct: Math.min(100, tgt + 2.5)
+                            x: (minPct / 100.0) * barTrack.width
+                            width: Math.max(2, ((maxPct - minPct) / 100.0) * barTrack.width)
+                            height: parent.height
+                            radius: 4
+                            color: Qt.rgba(bucketRow.baseColor.r, bucketRow.baseColor.g, bucketRow.baseColor.b, 0.20)
+                        }
+
+                        // Actual Value Bar
+                        Rectangle {
+                            height: parent.height
+                            radius: 4
+                            color: bucketRow.barColor
+                            width: Math.min(barTrack.width, Math.max(0, (bucketRow.modelData.actual_pct / 100.0) * barTrack.width))
+                        }
+
+                        // Target Tick Marker
+                        Rectangle {
+                            x: Math.min(barTrack.width - 2, Math.max(0, (bucketRow.modelData.target_pct / 100.0) * barTrack.width - 1))
+                            y: -Math.round(2 * root.d)
+                            width: 2
+                            height: parent.height + Math.round(4 * root.d)
+                            color: IrisStyle.text
+                            radius: 1
+                        }
+                    }
+
+                    IrisText {
+                        text: bucketRow.modelData.actual_pct.toFixed(1) + "%"
+                        font.family: IrisStyle.fontNumbers
+                        font.pixelSize: Math.round(10 * root.d)
+                        font.weight: IrisStyle.weight(Font.DemiBold)
+                        font.features: ({ "tnum": 1 })
+                        color: bucketRow.barColor
+                        Layout.preferredWidth: Math.round(38 * root.d)
+                        horizontalAlignment: Text.AlignRight
                     }
                 }
             }

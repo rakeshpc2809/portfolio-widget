@@ -2,6 +2,8 @@
 # Schema Version: 2
 
 [targets]
+# Bucket and target drift rebalancing logic is optional. Set enabled = true to track bucket drift.
+enabled = false
 # Target allocation percentage bands across portfolio buckets
 Core = 50.0
 Satellite = 30.0

@@ -58,6 +58,9 @@ Singleton {
         upcoming: []
     })
     property var sparkline90d: []
+    property bool bucketsEnabled: false
+    property var allocation: []
+    property var topMovers: []
     property var portfolioOs: ({
         enabled: false,
         xirr_pct: null,
@@ -171,6 +174,9 @@ Singleton {
             }
 
             if (Array.isArray(data.buckets)) root.buckets = data.buckets
+            root.bucketsEnabled = Boolean(data.buckets_enabled ?? data.portfolio_os?.enabled ?? false)
+            if (Array.isArray(data.allocation)) root.allocation = data.allocation
+            if (Array.isArray(data.top_movers)) root.topMovers = data.top_movers
             if (Array.isArray(data.attention_items)) root.attentionItems = data.attention_items
             if (Array.isArray(data.holdings)) root.holdings = data.holdings
             if (data.sips) root.sips = data.sips
