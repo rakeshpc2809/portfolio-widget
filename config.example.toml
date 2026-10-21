@@ -1,0 +1,35 @@
+# portfolio-widget Configuration (~/.config/inir/indmoney/config.toml)
+# Schema Version: 2
+
+[targets]
+# Target allocation percentage bands across portfolio buckets
+Core = 50.0
+Satellite = 30.0
+Gold_Silver = 10.0
+Liquid = 10.0
+# Drift tolerance percentage (+/-) before an attention alert is triggered
+drift_tolerance_pct = 2.5
+
+[polling]
+# Mutual fund portfolios (typically >80% weight) default to NAV-aware publication windows:
+# 21:30–23:30 IST and 07:30–09:30 IST.
+# Intraday polling during active market hours is only triggered if direct equity weight
+# exceeds the threshold below AND intraday_equity_polling is enabled.
+intraday_equity_polling = false
+equity_weight_threshold_pct = 5.0
+
+[overrides]
+# Map upstream quirks to deterministic class_id and bucket_id
+# Keys can be ISIN, stock ticker / symbol, or fund name substring (matched case-insensitively).
+# class_id: "mf" | "in_eq" | "us_eq" | "cash" | "epf" | "gold"
+# bucket_id: "core" | "satellite" | "gold_silver" | "liquid" | "legacy"
+
+# Example 1: Nasdaq-100 ETF arriving from upstream broker as a "small cap stock"
+"MON100" = { class_id = "us_eq", bucket_id = "satellite" }
+"INF247L01AU4" = { class_id = "us_eq", bucket_id = "satellite" }
+
+# Example 2: Arbitrage fund incorrectly classified as "Others"
+"arbitrage" = { class_id = "mf", bucket_id = "liquid" }
+
+# Example 3: Legacy or illiquid stock to track under legacy bucket
+"SUZLON" = { class_id = "in_eq", bucket_id = "legacy" }
