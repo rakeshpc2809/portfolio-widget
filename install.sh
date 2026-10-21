@@ -81,6 +81,8 @@ bubble_file = inir_dir / "modules" / "iris" / "components" / "IrisBubbleFace.qml
 if bubble_file.exists():
     content = bubble_file.read_text(encoding="utf-8")
     content = re.sub(r'/\* INIR_INDMONEY_BEGIN:import \*/.*?/\* INIR_INDMONEY_END:import \*/\n?', '', content, flags=re.DOTALL)
+    content = re.sub(r'/\* INIR_INDMONEY_BEGIN:lane_width \*/.*?/\* INIR_INDMONEY_END:lane_width \*/', '    readonly property real laneWidth: root.inline ? Math.max(root.height, inlineFace.implicitWidth + 2 * Math.round(8 * root.d)) : root.height', content, flags=re.DOTALL)
+    content = re.sub(r'/\* INIR_INDMONEY_BEGIN:radius \*/.*?/\* INIR_INDMONEY_END:radius \*/', '        radius: root.inline ? height / 2 : IrisStyle.pieceRadius(width)', content, flags=re.DOTALL)
     content = re.sub(r'/\* INIR_INDMONEY_BEGIN:face \*/.*?/\* INIR_INDMONEY_END:face \*/\n\n?', '', content, flags=re.DOTALL)
     content = re.sub(r'/\* INIR_INDMONEY_BEGIN:accessible \*/.*?/\* INIR_INDMONEY_END:accessible \*/', '    Accessible.name: root.kind === "controls" ? Translation.tr("Quick controls")', content, flags=re.DOTALL)
     # Legacy fallbacks
@@ -204,11 +206,22 @@ FACE_BLOCK = """/* INIR_INDMONEY_BEGIN:face */
         anchors.centerIn: parent
         screenName: root.screenName
         plated: root.plated
+        lane: root.lane
         hovered: root.hovered
         pressed: root.pressed
         onActivated: root.clicked()
     }
 /* INIR_INDMONEY_END:face */"""
+
+LANE_WIDTH_BLOCK = """/* INIR_INDMONEY_BEGIN:lane_width */
+    readonly property real laneWidth: (root.lane && root.kind === "portfolio")
+        ? Math.max(root.height, portfolioPiece.implicitWidth)
+        : root.inline ? Math.max(root.height, inlineFace.implicitWidth + 2 * Math.round(8 * root.d)) : root.height
+/* INIR_INDMONEY_END:lane_width */"""
+
+RADIUS_BLOCK = """/* INIR_INDMONEY_BEGIN:radius */
+        radius: (root.inline || root.kind === "portfolio") ? height / 2 : IrisStyle.pieceRadius(width)
+/* INIR_INDMONEY_END:radius */"""
 
 ACCESSIBLE_BLOCK = """/* INIR_INDMONEY_BEGIN:accessible */
     Accessible.name: root.kind === "portfolio" ? Translation.tr("Portfolio")
@@ -277,6 +290,16 @@ if bubble_file.exists():
         content = re.sub(r'/\* INIR_INDMONEY_BEGIN:import \*/.*?/\* INIR_INDMONEY_END:import \*/', IMPORT_BLOCK, content, flags=re.DOTALL)
     elif 'import qs.modules.iris.pieces' not in content:
         content = content.replace('import qs.modules.iris.style\n', 'import qs.modules.iris.style\n' + IMPORT_BLOCK + '\n', 1)
+
+    if '/* INIR_INDMONEY_BEGIN:lane_width */' in content:
+        content = re.sub(r'/\* INIR_INDMONEY_BEGIN:lane_width \*/.*?/\* INIR_INDMONEY_END:lane_width \*/', LANE_WIDTH_BLOCK, content, flags=re.DOTALL)
+    else:
+        content = content.replace('    readonly property real laneWidth: root.inline ? Math.max(root.height, inlineFace.implicitWidth + 2 * Math.round(8 * root.d)) : root.height', LANE_WIDTH_BLOCK, 1)
+
+    if '/* INIR_INDMONEY_BEGIN:radius */' in content:
+        content = re.sub(r'/\* INIR_INDMONEY_BEGIN:radius \*/.*?/\* INIR_INDMONEY_END:radius \*/', RADIUS_BLOCK, content, flags=re.DOTALL)
+    else:
+        content = content.replace('        radius: root.inline ? height / 2 : IrisStyle.pieceRadius(width)', RADIUS_BLOCK, 1)
 
     if '/* INIR_INDMONEY_BEGIN:face */' in content:
         content = re.sub(r'/\* INIR_INDMONEY_BEGIN:face \*/.*?/\* INIR_INDMONEY_END:face \*/', FACE_BLOCK, content, flags=re.DOTALL)

@@ -15,6 +15,7 @@ Item {
     property string kind: "portfolio"
     property string screenName: ""
     property bool plated: true
+    property bool lane: true
     property bool hovered: false
     property bool pressed: false
 
@@ -24,7 +25,7 @@ Item {
     readonly property real investedVal: IndMoneyService.investedValue
     readonly property real dayPct: IndMoneyService.oneDayChangePct
     readonly property bool isGain: dayPct >= 0
-    readonly property bool showDayPct: (hoverHandler.hovered || root.hovered) || !IndMoneyService.quietMode
+    readonly property bool showDayPct: root.lane && ((hoverHandler.hovered || root.hovered) || !IndMoneyService.quietMode)
 
     // Attention / Status alert states (M6: calm status, no infinite loop at rest)
     readonly property bool hasAttention: IndMoneyService.attentionItems.length > 0
@@ -43,7 +44,9 @@ Item {
     }
 
     // Fit seamlessly into iRiS Island bar geometry
-    implicitWidth: Math.max(contentRow.implicitWidth + Math.round(12 * root.d), Math.round(36 * root.d))
+    implicitWidth: root.lane
+        ? Math.max(contentRow.implicitWidth + Math.round(12 * root.d), Math.round(36 * root.d))
+        : Math.round(28 * root.d)
     implicitHeight: Math.round(28 * root.d)
 
     RowLayout {
@@ -71,6 +74,7 @@ Item {
         // Networth Amount: slot-rolling IrisNumber with zero-leak opacity crossfade (M2, M8, V5)
         Item {
             id: amountContainer
+            visible: root.lane
             implicitWidth: Math.max(liveNumber.implicitWidth, maskText.implicitWidth)
             implicitHeight: Math.max(liveNumber.implicitHeight, maskText.implicitHeight)
             Layout.alignment: Qt.AlignVCenter
@@ -124,7 +128,7 @@ Item {
             implicitHeight: dayText.implicitHeight
             Layout.alignment: Qt.AlignVCenter
             opacity: root.showDayPct ? 1.0 : 0.0
-            visible: opacity > 0.01
+            visible: root.lane && opacity > 0.01
 
             Behavior on opacity {
                 NumberAnimation {
