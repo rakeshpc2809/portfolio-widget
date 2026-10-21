@@ -108,13 +108,82 @@ def is_market_open(now_ist: datetime.datetime | None = None, unchanged_streak: i
     return get_market_state(now_ist, unchanged_streak=unchanged_streak) in ("IN_OPEN", "US_OPEN")
 
 
+def is_nav_window(now_ist: datetime.datetime | None = None) -> bool:
+    """
+    Returns True if current IST time falls within Indian mutual fund T+1 NAV publication windows:
+    - Morning window: 07:30 to 09:30 IST
+    - Evening window: 21:30 to 23:30 IST
+    """
+    if now_ist is None:
+        now_ist = get_current_ist_time()
+
+    time_min = now_ist.hour * 60 + now_ist.minute
+    # Morning: 07:30 (450m) to 09:30 (570m)
+    if 450 <= time_min < 570:
+        return True
+    # Evening: 21:30 (1290m) to 23:30 (1410m)
+    if 1290 <= time_min < 1410:
+        return True
+
+    return False
+
+
+def get_direct_equity_weight(state: dict[str, Any] | None) -> float:
+    """Calculates direct equity weight percentage (Indian stocks + US stocks) from state."""
+    if not isinstance(state, dict):
+        return 0.0
+
+    # 1. From v2 allocations.items
+    allocations = state.get("allocations")
+    if isinstance(allocations, dict):
+        items = allocations.get("items", [])
+        if isinstance(items, list):
+            eq_weight = 0.0
+            found = False
+            for it in items:
+                if isinstance(it, dict) and it.get("id") in ("indian_stocks", "us_stocks", "stocks", "in_eq", "us_eq"):
+                    eq_weight += float(it.get("weight_pct", 0.0))
+                    found = True
+            if found:
+                return eq_weight
+
+    # 2. From v1 allocation list or dict
+    alloc_v1 = state.get("allocation")
+    if isinstance(alloc_v1, list):
+        eq_weight = 0.0
+        found = False
+        for item in alloc_v1:
+            if isinstance(item, dict) and str(item.get("asset", "")).lower() in ("indian stocks", "us stocks", "stocks", "in_eq", "us_eq"):
+                eq_weight += float(item.get("weight_pct", 0.0))
+                found = True
+        if found:
+            return eq_weight
+    elif isinstance(alloc_v1, dict):
+        eq_weight = 0.0
+        found = False
+        for k, v in alloc_v1.items():
+            if str(k).lower() in ("indian stocks", "us stocks", "stocks", "indian_stocks", "us_stocks", "in_eq", "us_eq"):
+                if isinstance(v, dict):
+                    eq_weight += float(v.get("percentage", 0.0))
+                    found = True
+        if found:
+            return eq_weight
+
+    # 3. Direct equity weight if explicitly stored
+    if "direct_equity_weight_pct" in state:
+        return float(state["direct_equity_weight_pct"])
+
+    return 0.0
+
+
 def should_fetch(
     state: dict[str, Any] | None = None,
     force: bool = False,
-    now: float | None = None
+    now: float | None = None,
+    config: Any = None,
 ) -> tuple[bool, str, str]:
     """
-    Decides whether a fetch should occur based on state, unchanged_streak, and market hours.
+    Decides whether a fetch should occur based on state, unchanged_streak, NAV windows, and market hours.
     Returns (should_fetch, reason, market_state).
     """
     if now is None:
@@ -130,6 +199,37 @@ def should_fetch(
             last_fetch_ts = float(state["updated_at"])
 
     nominal_state = get_nominal_market_state(now_ist)
+    market_state = get_market_state(now_ist, unchanged_streak=unchanged_streak)
+
+    if force:
+        return True, "forced by user request", market_state
+
+    if last_fetch_ts <= 0:
+        return True, "initial fetch / no previous cache", market_state
+
+    # Check NAV-aware window vs intraday equity polling
+    if config is None:
+        try:
+            from indmoney_sync.config import load_config
+            cfg = load_config()
+        except Exception:
+            cfg = None
+    else:
+        cfg = config
+
+    is_nav = is_nav_window(now_ist)
+
+    # Determine if intraday high-frequency polling is active for market hours
+    intraday_equity_active = False
+    if cfg is not None and getattr(cfg, "polling", None) is not None:
+        p_cfg = cfg.polling
+        if getattr(p_cfg, "intraday_equity_polling", False):
+            eq_weight = get_direct_equity_weight(state)
+            thresh = getattr(p_cfg, "equity_weight_threshold_pct", 5.0)
+            if eq_weight > thresh and nominal_state in ("IN_OPEN", "US_OPEN"):
+                intraday_equity_active = True
+
+    high_freq_active = is_nav or intraday_equity_active
 
     # Check nominal window transition from previous sync (e.g. CLOSED -> IN_OPEN)
     window_transition_bell = False
@@ -139,17 +239,10 @@ def should_fetch(
         prev_nominal = get_nominal_market_state(prev_ist)
         if prev_nominal != nominal_state:
             unchanged_streak = 0
-            # If entering an active market window, schedule immediate opening bell sync
             if nominal_state in ("IN_OPEN", "US_OPEN"):
                 window_transition_bell = True
 
     market_state = get_market_state(now_ist, unchanged_streak=unchanged_streak)
-
-    if force:
-        return True, "forced by user request", market_state
-
-    if last_fetch_ts <= 0:
-        return True, "initial fetch / no previous cache", market_state
 
     if window_transition_bell:
         return True, f"opening bell window transition ({prev_nominal} -> {nominal_state})", nominal_state
@@ -164,16 +257,16 @@ def should_fetch(
             return True, f"stagnant market backoff (streak={unchanged_streak}) and cache is {int(age_sec/60)}m old", "CLOSED"
         return False, f"stagnant market backoff (streak={unchanged_streak}) and cache is fresh ({int(age_sec/60)}m old)", "CLOSED"
 
-    if market_state in ("IN_OPEN", "US_OPEN"):
-        # 15 minutes during active market windows
+    if high_freq_active:
+        prefix = "NAV window active" if is_nav else f"market active ({market_state})"
         if age_sec >= 15 * 60:
-            return True, f"market active ({market_state}) and cache is {int(age_sec/60)}m old", market_state
-        return False, f"market active ({market_state}) but cache is fresh ({int(age_sec/60)}m old)", market_state
+            return True, f"{prefix} and cache is {int(age_sec/60)}m old", market_state
+        return False, f"{prefix} but cache is fresh ({int(age_sec/60)}m old)", market_state
     else:
-        # 60 minutes off-hours / weekends / holidays
+        # Off-window / off-hours / mutual-fund-only holding outside NAV windows: 60 minutes
         if age_sec >= 60 * 60:
-            return True, f"off-hours and cache is {int(age_sec/60)}m old", market_state
-        return False, f"off-hours and cache is fresh ({int(age_sec/60)}m old)", market_state
+            return True, f"off-window cadence and cache is {int(age_sec/60)}m old", market_state
+        return False, f"off-window cadence and cache is fresh ({int(age_sec/60)}m old)", market_state
 
 
 def should_execute_fetch(
@@ -181,7 +274,9 @@ def should_execute_fetch(
     force: bool = False,
     unchanged_streak: int = 0,
     now: float | None = None,
+    config: Any = None,
 ) -> tuple[bool, str, str]:
     """Compatibility wrapper for should_fetch."""
     state = {"updated_at": last_fetch_ts, "unchanged_streak": unchanged_streak}
-    return should_fetch(state=state, force=force, now=now)
+    return should_fetch(state=state, force=force, now=now, config=config)
+

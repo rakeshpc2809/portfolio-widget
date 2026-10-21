@@ -195,6 +195,124 @@ class TestNormalizer(unittest.TestCase):
             # Since streak is 1 (< 2), market_state is active IN_OPEN, NOT throttled
             self.assertEqual(state["market_state"], "IN_OPEN")
 
+    def test_live_shaped_raw_replay_and_schema_v2_validation(self):
+        """
+        [C1, C2, C3, C4, C7, C8, F1, F2, F4, F6]
+        Replay against tests/fixtures/live_shaped_raw.json with reference date 2026-10-28 IST:
+        - 1D change: exact -14,906.05
+        - SIP dates: 02-09-2026 -> 2026-11-02, 03-09-2026 -> 2026-11-03, 2026-09-04 -> 2026-11-04
+        - USD SIPs separated: monthly_total_usd == 50.0
+        - Nasdaq-100 ETF -> satellite / us_eq
+        - Arbitrage fund -> liquid / mf
+        - Buckets drift calculated
+        - Schema v2 passes jsonschema.validate
+        """
+        import json
+
+        import jsonschema
+
+        from indmoney_sync.config import AppConfig, BucketTargets, OverrideRule
+
+        fixture_path = Path(__file__).resolve().parent / "fixtures" / "live_shaped_raw.json"
+        schema_path = Path(__file__).resolve().parent.parent / "docs" / "schema-v2.json"
+
+        with open(fixture_path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        with open(schema_path, "r", encoding="utf-8") as f:
+            schema = json.load(f)
+
+        ref_time = datetime.datetime(2026, 10, 28, 20, 30, tzinfo=datetime.timezone(datetime.timedelta(hours=5, minutes=30)))
+
+        cfg = AppConfig(
+            bucket_targets=BucketTargets(core=50.0, satellite=30.0, gold_silver=10.0, liquid=10.0, drift_tolerance_pct=2.5),
+            overrides={
+                "INF247L01AU4": OverrideRule(class_id="us_eq", bucket_id="satellite"),
+                "arbitrage": OverrideRule(class_id="mf", bucket_id="liquid"),
+            }
+        )
+
+        state = build_normalized_state(
+            snapshot=raw["asset_summary"],
+            allocation=raw["allocation"],
+            holdings=raw["holdings"],
+            mf_sips=raw["mf_sips"],
+            in_sips=raw["in_sips"],
+            us_sips=raw["us_sips"],
+            reference_time=ref_time,
+            config=cfg,
+        )
+
+        # 1. Authoritative 1D Change
+        self.assertEqual(state["invested_portfolio"]["one_day_change_inr"], -14906.05)
+        self.assertAlmostEqual(state["invested_portfolio"]["one_day_change_pct"], -0.59, delta=0.01)
+
+        # 2. Dual-basis separation: invested portfolio excludes bank and EPF
+        # Total invested holdings: 750k + 250k + 500k + 600k + 150k + 50k + 200k = 2,500,000
+        self.assertEqual(state["invested_portfolio"]["current_value_inr"], 2500000.0)
+        self.assertEqual(state["total_networth"]["bank_balance_inr"], 75000.0)
+        self.assertEqual(state["total_networth"]["epf_inr"], 350000.0)
+        self.assertEqual(state["total_networth"]["total_networth_inr"], 2925000.0)
+
+        # 3. SIP Date projection and frequency normalization
+        sips = state["sips"]
+        upcoming = sips["upcoming"]
+        dates = [s["next_date"] for s in upcoming]
+        self.assertIn("2026-11-02", dates)
+        self.assertIn("2026-11-03", dates)
+        self.assertIn("2026-11-04", dates)
+
+        # next_7d_sip_inr includes Nov 2, 3, 4 (and weekly SIP): 10000 + 7500 + 5000 = 22500
+        self.assertGreater(sips["next_7d_sip_inr"], 20000.0)
+        self.assertEqual(sips["monthly_total_usd"], 50.0)
+
+        # 4. Buckets
+        b_map = {b["bucket_id"]: b for b in state["buckets"]}
+        # Core: Parag Parikh (750k + 250k = 1M) + ICICI N50 (500k) + Mirae (600k) = 2,100,000 -> 84%
+        self.assertEqual(b_map["core"]["actual_pct"], 84.0)
+        self.assertEqual(b_map["core"]["target_pct"], 50.0)
+        self.assertEqual(b_map["core"]["drift_pct"], 34.0)
+        self.assertFalse(b_map["core"]["in_band"])
+
+        # Satellite: MON100 (150k) + Reliance (200k) = 350,000 -> 14%
+        self.assertEqual(b_map["satellite"]["actual_pct"], 14.0)
+        self.assertEqual(b_map["satellite"]["target_pct"], 30.0)
+
+        # Liquid: Kotak Arbitrage (50k) -> 2%
+        self.assertEqual(b_map["liquid"]["actual_pct"], 2.0)
+
+        # 5. Attention Items: Core drift breach alert generated
+        alerts = state["attention_items"]
+        self.assertTrue(any(a["type"] == "band_breach" and "Core" in a["title"] for a in alerts))
+
+        # 6. Validate against schema v2 contract
+        jsonschema.validate(instance=state, schema=schema)
+
+    def test_update_sparkline_90d_in_place_and_capping(self):
+        """[C11]: Verifies 90-day sparkline in-place update for today and 90-day capping."""
+        from indmoney_sync.normalizer import update_sparkline_90d
+
+        buffer = []
+        # Day 1 initial
+        buffer = update_sparkline_90d(buffer, current_val=2500000.0, current_date_str="2026-10-20")
+        self.assertEqual(len(buffer), 1)
+        self.assertEqual(buffer[0]["v"], 2500000.0)
+
+        # Same day value update -> in-place update, length stays 1
+        buffer = update_sparkline_90d(buffer, current_val=2515000.0, current_date_str="2026-10-20")
+        self.assertEqual(len(buffer), 1)
+        self.assertEqual(buffer[0]["v"], 2515000.0)
+
+        # Next day -> new entry appended
+        buffer = update_sparkline_90d(buffer, current_val=2520000.0, current_date_str="2026-10-21")
+        self.assertEqual(len(buffer), 2)
+        self.assertEqual(buffer[-1]["v"], 2520000.0)
+
+        # Capping at 90 days
+        long_series = [{"date": f"2026-01-{(i%28)+1:02d}", "v": 1000000.0 + i} for i in range(100)]
+        capped = update_sparkline_90d(long_series, current_val=3000000.0, current_date_str="2026-10-22", max_days=90)
+        self.assertEqual(len(capped), 90)
+        self.assertEqual(capped[-1]["v"], 3000000.0)
+
 
 if __name__ == "__main__":
     unittest.main()

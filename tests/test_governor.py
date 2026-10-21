@@ -77,14 +77,21 @@ class TestGovernor(unittest.TestCase):
 
     def test_unchanged_streak_auto_backoff_in_market(self):
         """If unchanged_streak >= 2 during nominal IN_OPEN, throttle back to 60m and display CLOSED."""
+        from indmoney_sync.config import AppConfig, PollingConfig
+
+        cfg = AppConfig(polling=PollingConfig(intraday_equity_polling=True, equity_weight_threshold_pct=5.0))
         tue_1130 = datetime.datetime(2026, 10, 20, 11, 30, tzinfo=IST)
         now_ts = tue_1130.timestamp()
 
         # Streak 0: Normal active trading
         self.assertEqual(get_market_state(tue_1130, unchanged_streak=0), "IN_OPEN")
         # 20 min old: Should fetch under 15m cadence
-        state_streak0 = {"updated_at": now_ts - 20 * 60, "unchanged_streak": 0}
-        should_run, _, m_state = should_fetch(state=state_streak0, force=False, now=now_ts)
+        state_streak0 = {
+            "updated_at": now_ts - 20 * 60,
+            "unchanged_streak": 0,
+            "allocations": {"items": [{"id": "indian_stocks", "weight_pct": 20.0}]}
+        }
+        should_run, _, m_state = should_fetch(state=state_streak0, force=False, now=now_ts, config=cfg)
         self.assertTrue(should_run)
         self.assertEqual(m_state, "IN_OPEN")
 
@@ -96,15 +103,23 @@ class TestGovernor(unittest.TestCase):
         self.assertFalse(is_market_open(tue_1130, unchanged_streak=2))
 
         # At age 20 min: Should NOT fetch (throttled to 60m)
-        state_streak2_fresh = {"updated_at": now_ts - 20 * 60, "unchanged_streak": 2}
-        should_run, reason, m_state = should_fetch(state=state_streak2_fresh, force=False, now=now_ts)
+        state_streak2_fresh = {
+            "updated_at": now_ts - 20 * 60,
+            "unchanged_streak": 2,
+            "allocations": {"items": [{"id": "indian_stocks", "weight_pct": 20.0}]}
+        }
+        should_run, reason, m_state = should_fetch(state=state_streak2_fresh, force=False, now=now_ts, config=cfg)
         self.assertFalse(should_run)
         self.assertEqual(m_state, "CLOSED")
         self.assertIn("stagnant market backoff", reason)
 
         # At age 65 min: Should fetch under 60m backoff cadence
-        state_streak2_stale = {"updated_at": now_ts - 65 * 60, "unchanged_streak": 2}
-        should_run, reason, m_state = should_fetch(state=state_streak2_stale, force=False, now=now_ts)
+        state_streak2_stale = {
+            "updated_at": now_ts - 65 * 60,
+            "unchanged_streak": 2,
+            "allocations": {"items": [{"id": "indian_stocks", "weight_pct": 20.0}]}
+        }
+        should_run, reason, m_state = should_fetch(state=state_streak2_stale, force=False, now=now_ts, config=cfg)
         self.assertTrue(should_run)
         self.assertEqual(m_state, "CLOSED")
         self.assertIn("stagnant market backoff", reason)
@@ -194,6 +209,121 @@ class TestGovernor(unittest.TestCase):
         should_run, reason, _ = should_execute_fetch(last_fetch_ts=10000000000, force=True)
         self.assertTrue(should_run)
         self.assertIn("forced", reason)
+
+
+    def test_is_nav_window(self):
+        """NAV publication windows: 07:30-09:30 IST and 21:30-23:30 IST."""
+        # Morning NAV window: 08:15 IST
+        morn_in = datetime.datetime(2026, 10, 20, 8, 15, tzinfo=IST)
+        self.assertTrue(gov.is_nav_window(morn_in))
+
+        # Morning boundary 07:30
+        morn_bound = datetime.datetime(2026, 10, 20, 7, 30, tzinfo=IST)
+        self.assertTrue(gov.is_nav_window(morn_bound))
+
+        # Evening NAV window: 22:15 IST
+        eve_in = datetime.datetime(2026, 10, 20, 22, 15, tzinfo=IST)
+        self.assertTrue(gov.is_nav_window(eve_in))
+
+        # Evening boundary 21:30
+        eve_bound = datetime.datetime(2026, 10, 20, 21, 30, tzinfo=IST)
+        self.assertTrue(gov.is_nav_window(eve_bound))
+
+        # Outside windows: 11:30 IST (market hours, but not NAV window)
+        midday = datetime.datetime(2026, 10, 20, 11, 30, tzinfo=IST)
+        self.assertFalse(gov.is_nav_window(midday))
+
+        # Outside windows: 02:00 IST
+        night = datetime.datetime(2026, 10, 20, 2, 0, tzinfo=IST)
+        self.assertFalse(gov.is_nav_window(night))
+
+    def test_default_nav_aware_schedule_throttles_market_hours_without_equity(self):
+        """By default (intraday_equity_polling=False), market hours outside NAV windows use 60m cadence."""
+        tue_1130 = datetime.datetime(2026, 10, 20, 11, 30, tzinfo=IST)
+        now_ts = tue_1130.timestamp()
+
+        # Mutual fund portfolio state (direct equity weight = 0%)
+        mf_state = {
+            "updated_at": now_ts - 20 * 60,  # 20 min old
+            "unchanged_streak": 0,
+            "allocations": {
+                "items": [{"id": "mutual_funds", "label": "Mutual Funds", "weight_pct": 100.0}]
+            }
+        }
+        # At 20 min old: should NOT fetch during midday because intraday equity polling is disabled
+        should_run, reason, m_state = should_fetch(state=mf_state, force=False, now=now_ts)
+        self.assertFalse(should_run)
+        self.assertEqual(m_state, "IN_OPEN")
+        self.assertIn("fresh", reason.lower())
+
+        # At 65 min old: should fetch on 60m off-window cadence
+        mf_state_old = dict(mf_state, updated_at=now_ts - 65 * 60)
+        should_run, reason, m_state = should_fetch(state=mf_state_old, force=False, now=now_ts)
+        self.assertTrue(should_run)
+        self.assertEqual(m_state, "IN_OPEN")
+
+    def test_nav_window_triggers_15m_polling_by_default(self):
+        """During evening NAV window (21:30–23:30 IST), 15m cadence is active even without equity polling."""
+        tue_2200 = datetime.datetime(2026, 10, 20, 22, 0, tzinfo=IST)
+        now_ts = tue_2200.timestamp()
+
+        state_20m = {
+            "updated_at": now_ts - 20 * 60,
+            "unchanged_streak": 0,
+            "allocations": {
+                "items": [{"id": "mutual_funds", "label": "Mutual Funds", "weight_pct": 100.0}]
+            }
+        }
+        should_run, reason, _ = should_fetch(state=state_20m, force=False, now=now_ts)
+        self.assertTrue(should_run)
+        self.assertIn("nav window active", reason.lower())
+
+    def test_intraday_equity_polling_enabled_above_threshold(self):
+        """When intraday_equity_polling is True and direct equity > 5%, 15m polling is enabled in market hours."""
+        from indmoney_sync.config import AppConfig, PollingConfig
+
+        cfg = AppConfig(polling=PollingConfig(intraday_equity_polling=True, equity_weight_threshold_pct=5.0))
+        tue_1130 = datetime.datetime(2026, 10, 20, 11, 30, tzinfo=IST)
+        now_ts = tue_1130.timestamp()
+
+        # Equity portfolio (direct equity = 25% > 5%)
+        eq_state = {
+            "updated_at": now_ts - 20 * 60,
+            "unchanged_streak": 0,
+            "allocations": {
+                "items": [
+                    {"id": "indian_stocks", "label": "Indian Stocks", "weight_pct": 25.0},
+                    {"id": "mutual_funds", "label": "Mutual Funds", "weight_pct": 75.0}
+                ]
+            }
+        }
+        should_run, reason, m_state = should_fetch(state=eq_state, force=False, now=now_ts, config=cfg)
+        self.assertTrue(should_run)
+        self.assertEqual(m_state, "IN_OPEN")
+        self.assertIn("market active", reason.lower())
+
+    def test_intraday_equity_polling_below_threshold_stays_on_60m(self):
+        """When intraday_equity_polling is True but direct equity <= 5%, 15m polling remains disabled."""
+        from indmoney_sync.config import AppConfig, PollingConfig
+
+        cfg = AppConfig(polling=PollingConfig(intraday_equity_polling=True, equity_weight_threshold_pct=5.0))
+        tue_1130 = datetime.datetime(2026, 10, 20, 11, 30, tzinfo=IST)
+        now_ts = tue_1130.timestamp()
+
+        # Equity portfolio (direct equity = 2.0% <= 5%)
+        eq_state = {
+            "updated_at": now_ts - 20 * 60,
+            "unchanged_streak": 0,
+            "allocations": {
+                "items": [
+                    {"id": "indian_stocks", "label": "Indian Stocks", "weight_pct": 2.0},
+                    {"id": "mutual_funds", "label": "Mutual Funds", "weight_pct": 98.0}
+                ]
+            }
+        }
+        should_run, reason, m_state = should_fetch(state=eq_state, force=False, now=now_ts, config=cfg)
+        self.assertFalse(should_run)
+        self.assertEqual(m_state, "IN_OPEN")
 
 
 if __name__ == "__main__":

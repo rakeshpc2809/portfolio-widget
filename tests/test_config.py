@@ -319,6 +319,16 @@ class TestSchemaV2Validation(unittest.TestCase):
         self.assertEqual(usd_sip["currency"], "USD")
         self.assertEqual(usd_sip["amount_usd"], 50.0)
 
+    def test_mock_data_validates_against_schema_v2(self):
+        """Verify that indmoney-sync mock payload strictly satisfies schema-v2 contract."""
+        from indmoney_sync.mock_data import get_mock_state
+        mock_payload = get_mock_state()
+        jsonschema.validate(instance=mock_payload, schema=self.schema)
+        self.assertEqual(mock_payload["schema_version"], 2)
+        self.assertEqual(mock_payload["provider"], "indmoney")
+        self.assertEqual(len(mock_payload["sparkline_90d"]), 91)
+
 
 if __name__ == "__main__":
     unittest.main()
+

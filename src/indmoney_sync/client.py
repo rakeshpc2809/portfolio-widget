@@ -1,5 +1,7 @@
 """Streamable HTTP MCP Client (MCP 2025-03-26 protocol) with SSE and direct JSON parsing."""
 import json
+import random
+import time
 from typing import Any
 
 import httpx
@@ -56,17 +58,37 @@ class IndMoneyMcpClient:
         if self.session_id:
             headers["Mcp-Session-Id"] = self.session_id
 
-        response = self._client.post(self.endpoint, json=payload, headers=headers)
+        max_retries = 3
+        base_delay = 0.5
+        response = None
 
-        # Capture session ID if returned by server
-        new_session = response.headers.get("Mcp-Session-Id")
-        if new_session:
-            self.session_id = new_session
+        for attempt in range(max_retries + 1):
+            try:
+                response = self._client.post(self.endpoint, json=payload, headers=headers)
 
-        if response.status_code == 401:
-            raise PermissionError("IndMoney token expired or invalid (401 Unauthorized)")
+                # Capture session ID if returned by server
+                new_session = response.headers.get("Mcp-Session-Id")
+                if new_session:
+                    self.session_id = new_session
 
-        response.raise_for_status()
+                if response.status_code == 401:
+                    raise PermissionError("IndMoney token expired or invalid (401 Unauthorized)")
+
+                if response.status_code == 429 or 500 <= response.status_code < 600:
+                    if attempt < max_retries:
+                        sleep_time = (base_delay * (2 ** attempt)) + random.uniform(0.05, 0.25)
+                        time.sleep(sleep_time)
+                        continue
+                    response.raise_for_status()
+
+                response.raise_for_status()
+                break
+            except (httpx.TransportError, httpx.TimeoutException):
+                if attempt < max_retries:
+                    sleep_time = (base_delay * (2 ** attempt)) + random.uniform(0.05, 0.25)
+                    time.sleep(sleep_time)
+                    continue
+                raise
 
         content_type = response.headers.get("content-type", "")
 

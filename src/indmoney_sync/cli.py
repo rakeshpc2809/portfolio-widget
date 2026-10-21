@@ -13,9 +13,11 @@ from .auth import (
     execute_browser_auth_flow,
     is_token_expired,
     load_cached_state_from_keyring,
+    load_sips_cache_from_keyring,
     load_tokens,
     refresh_token,
     save_cached_state_to_keyring,
+    save_sips_cache_to_keyring,
 )
 from .client import IndMoneyMcpClient
 from .governor import get_market_state, should_fetch
@@ -25,19 +27,24 @@ from .normalizer import build_normalized_state
 
 MCP_ENDPOINT = "https://mcp.indmoney.com/mcp"
 
-# Volatile RAM-backed tmpfs path for active runtime state
+# Volatile RAM-backed tmpfs path for active runtime state (mode 0700)
 RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "inir-indmoney"
-CACHE_DIR = Path.home() / ".cache" / "inir" / "indmoney"
+LEGACY_CACHE_DIR = Path.home() / ".cache" / "inir" / "indmoney"
 
 STATE_FILE = RUNTIME_DIR / "state.json"
 STATE_TMP_FILE = RUNTIME_DIR / "state.json.tmp"
-SIPS_CACHE_FILE = CACHE_DIR / "sips_cache.json"
-LEGACY_LAST_GOOD_FILE = CACHE_DIR / "last_good.json"
+SIPS_CACHE_FILE = RUNTIME_DIR / "sips_cache.json"
 
 
 def ensure_dirs() -> None:
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(RUNTIME_DIR, 0o700)
+    except Exception:
+        pass
+    if LEGACY_CACHE_DIR.exists():
+        import shutil
+        shutil.rmtree(LEGACY_CACHE_DIR, ignore_errors=True)
 
 
 def write_atomic_state(payload: dict[str, Any]) -> None:
@@ -54,15 +61,8 @@ def write_atomic_state(payload: dict[str, Any]) -> None:
     os.replace(STATE_TMP_FILE, STATE_FILE)
 
     # Persist backup securely into encrypted OS Keyring (zero disk leaks)
-    if payload.get("status") == "ok":
+    if payload.get("status") in ("ok", "partial"):
         save_cached_state_to_keyring(payload)
-
-    # Clean up legacy unencrypted disk cache if present
-    if LEGACY_LAST_GOOD_FILE.exists():
-        try:
-            LEGACY_LAST_GOOD_FILE.unlink(missing_ok=True)
-        except Exception:
-            pass
 
 
 def hydrate_state() -> bool:
@@ -76,20 +76,7 @@ def hydrate_state() -> bool:
     if STATE_FILE.exists():
         return False
 
-    # First check encrypted keyring
     cached = load_cached_state_from_keyring()
-
-    # Fallback migration check for legacy file if keyring empty
-    if not cached and LEGACY_LAST_GOOD_FILE.exists():
-        try:
-            with open(LEGACY_LAST_GOOD_FILE, "r", encoding="utf-8") as f:
-                cached = json.load(f)
-            if cached:
-                save_cached_state_to_keyring(cached)
-                LEGACY_LAST_GOOD_FILE.unlink(missing_ok=True)
-        except Exception:
-            pass
-
     if not cached:
         return False
 
@@ -146,9 +133,10 @@ def cmd_auth(args: argparse.Namespace) -> int:
 
 
 def cmd_inspect(args: argparse.Namespace) -> int:
-    print("[indmoney-sync] Inspecting IndMoney MCP schemas...")
+    allow_raw_dump = getattr(args, "allow_raw_dump", False)
+    print(f"[indmoney-sync] Inspecting IndMoney MCP schemas (allow_raw_dump={allow_raw_dump})...")
     try:
-        run_inspect()
+        run_inspect(allow_raw_dump=allow_raw_dump)
         return 0
     except Exception as e:
         print(f"[indmoney-sync] Inspect failed: {e}", file=sys.stderr)
@@ -221,6 +209,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         tokens = refreshed
 
     access_token = tokens["access_token"]
+    failed_sources: list[str] = []
 
     try:
         with IndMoneyMcpClient(MCP_ENDPOINT, access_token) as client:
@@ -229,7 +218,15 @@ def cmd_fetch(args: argparse.Namespace) -> int:
             # Fast tier tools
             if verbose:
                 print("[indmoney-sync] Fetching networth_snapshot...")
-            snapshot = client.call_tool("networth_snapshot")
+            snapshot = None
+            try:
+                snapshot = client.call_tool("networth_snapshot")
+            except Exception as e:
+                failed_sources.append("networth_snapshot")
+                if verbose:
+                    print(f"[indmoney-sync] Warning fetching networth_snapshot: {e}")
+                if prev_state and isinstance(prev_state.get("snapshot"), (dict, list)):
+                    snapshot = prev_state["snapshot"]
 
             # Extract allocation directly from snapshot assets/investments
             allocation = None
@@ -239,6 +236,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
             if verbose:
                 print("[indmoney-sync] Fetching holdings (MF, IND_STOCK, US_STOCK)...")
             holdings = []
+            class_map = {"MF": "mf", "IND_STOCK": "in_eq", "US_STOCK": "us_eq"}
             for asset_type in ["MF", "IND_STOCK", "US_STOCK"]:
                 try:
                     res = client.call_tool("networth_holdings", {"asset_type": asset_type})
@@ -247,10 +245,17 @@ def cmd_fetch(args: argparse.Namespace) -> int:
                     elif isinstance(res, list):
                         holdings.extend(res)
                 except Exception as e:
+                    tool_id = f"networth_holdings_{asset_type.lower()}"
+                    failed_sources.append(tool_id)
                     if verbose:
                         print(f"[indmoney-sync] Warning fetching {asset_type} holdings: {e}")
+                    # Preserve cached slice from prev_state if available
+                    if prev_state and isinstance(prev_state.get("holdings"), list):
+                        target_class = class_map.get(asset_type)
+                        prev_slice = [h for h in prev_state["holdings"] if h.get("class_id") == target_class]
+                        holdings.extend(prev_slice)
 
-            # Slow tier tools (SIPs) - cache for 6 hours
+            # Slow tier tools (SIPs) - cache for 6 hours in tmpfs & keyring
             now = time.time()
             sips_cached = None
             if SIPS_CACHE_FILE.exists():
@@ -261,30 +266,49 @@ def cmd_fetch(args: argparse.Namespace) -> int:
                             sips_cached = json.load(f)
                 except Exception:
                     pass
-
             if not sips_cached:
+                sips_cached = load_sips_cache_from_keyring()
+
+            if not sips_cached or force:
                 if verbose:
                     print("[indmoney-sync] Fetching slow-tier tools (SIPs)...")
-                try:
-                    mf_sips = client.call_tool("mf_sips")
-                except Exception:
-                    mf_sips = []
-                try:
-                    in_sips = client.call_tool("indian_stocks_sips")
-                except Exception:
-                    in_sips = []
-                try:
-                    us_sips = client.call_tool("us_stocks_sips")
-                except Exception:
-                    us_sips = []
+                existing_sips = sips_cached or {}
+                sips_cached = dict(existing_sips)
 
-                sips_cached = {
-                    "mf": mf_sips,
-                    "in": in_sips,
-                    "us": us_sips
-                }
-                with open(SIPS_CACHE_FILE, "w", encoding="utf-8") as f:
-                    json.dump(sips_cached, f)
+                try:
+                    sips_cached["mf"] = client.call_tool("mf_sips")
+                except Exception as e:
+                    failed_sources.append("mf_sips")
+                    if "mf" not in sips_cached or sips_cached["mf"] is None:
+                        sips_cached["mf"] = []
+                    if verbose:
+                        print(f"[indmoney-sync] Warning fetching mf_sips: {e}")
+
+                try:
+                    sips_cached["in"] = client.call_tool("indian_stocks_sips")
+                except Exception as e:
+                    failed_sources.append("indian_stocks_sips")
+                    if "in" not in sips_cached or sips_cached["in"] is None:
+                        sips_cached["in"] = []
+                    if verbose:
+                        print(f"[indmoney-sync] Warning fetching indian_stocks_sips: {e}")
+
+                try:
+                    sips_cached["us"] = client.call_tool("us_stocks_sips")
+                except Exception as e:
+                    failed_sources.append("us_stocks_sips")
+                    if "us" not in sips_cached or sips_cached["us"] is None:
+                        sips_cached["us"] = []
+                    if verbose:
+                        print(f"[indmoney-sync] Warning fetching us_stocks_sips: {e}")
+
+                # Save sips to tmpfs and keyring
+                try:
+                    with open(SIPS_CACHE_FILE, "w", encoding="utf-8") as f:
+                        json.dump(sips_cached, f)
+                    save_sips_cache_to_keyring(sips_cached)
+                except Exception:
+                    pass
 
             # Retrieve previous sparkline ring buffer from tmpfs state or encrypted keyring
             prev_sparkline = []
@@ -292,14 +316,21 @@ def cmd_fetch(args: argparse.Namespace) -> int:
                 try:
                     with open(STATE_FILE, "r", encoding="utf-8") as f:
                         prev_data = json.load(f)
-                        if isinstance(prev_data.get("sparkline"), list):
+                        if isinstance(prev_data.get("sparkline_90d"), list):
+                            prev_sparkline = prev_data["sparkline_90d"]
+                        elif isinstance(prev_data.get("sparkline"), list):
                             prev_sparkline = prev_data["sparkline"]
                 except Exception:
                     pass
             if not prev_sparkline:
                 cached_prev = load_cached_state_from_keyring()
-                if cached_prev and isinstance(cached_prev.get("sparkline"), list):
-                    prev_sparkline = cached_prev["sparkline"]
+                if cached_prev:
+                    if isinstance(cached_prev.get("sparkline_90d"), list):
+                        prev_sparkline = cached_prev["sparkline_90d"]
+                    elif isinstance(cached_prev.get("sparkline"), list):
+                        prev_sparkline = cached_prev["sparkline"]
+
+            sync_status = "partial" if failed_sources else "ok"
 
             state = build_normalized_state(
                 snapshot=snapshot,
@@ -310,14 +341,16 @@ def cmd_fetch(args: argparse.Namespace) -> int:
                 us_sips=sips_cached.get("us"),
                 prev_sparkline=prev_sparkline,
                 prev_state=prev_state,
-                status="ok"
+                status=sync_status,
+                failed_sources=failed_sources,
             )
 
             write_atomic_state(state)
             if verbose:
-                networth = state["summary"]["total_networth_inr"]
-                pnl = state["summary"]["total_pnl_inr"]
-                print(f"[indmoney-sync] Sync successful! Net worth: ₹{networth:,.2f} (P&L: ₹{pnl:,.2f})")
+                inv = state.get("invested_portfolio", {})
+                curr_val = inv.get("current_value_inr", 0)
+                ret_inr = inv.get("total_return_inr", 0)
+                print(f"[indmoney-sync] Sync successful ({sync_status})! Invested: ₹{curr_val:,.2f} (Return: ₹{ret_inr:,.2f})")
             return 0
 
     except PermissionError as e:
@@ -355,15 +388,18 @@ def cmd_status(args: argparse.Namespace) -> int:
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            s = data.get("summary", {})
+            inv = data.get("invested_portfolio", {})
+            net = data.get("total_networth", {})
             print(f"Active State (RAM):{STATE_FILE}")
             print(f"Updated At:        {time.ctime(data.get('updated_at', 0))}")
-            print(f"Total Net Worth:   ₹{s.get('total_networth_inr', 0):,.2f}")
-            print(f"Total Invested:    ₹{s.get('invested_inr', 0):,.2f}")
-            print(f"1D Change:        ₹{s.get('day_change_inr', 0):,.2f} ({s.get('day_change_pct', 0)}%)")
+            print(f"Total Net Worth:   ₹{net.get('total_networth_inr', 0):,.2f}")
+            print(f"Invested Value:    ₹{inv.get('current_value_inr', 0):,.2f}")
+            print(f"1D Change:        ₹{inv.get('one_day_change_inr', 0):,.2f} ({inv.get('one_day_change_pct', 0)}%)")
             print(f"Status:           {data.get('status')}")
-            spark_len = len(data.get("sparkline", []))
-            print(f"Sparkline Points: {spark_len}/30")
+            if data.get("failed_sources"):
+                print(f"Failed Sources:   {data.get('failed_sources')}")
+            spark_len = len(data.get("sparkline_90d", data.get("sparkline", [])))
+            print(f"Sparkline Points: {spark_len}/90")
         except Exception as e:
             print(f"Error reading state file: {e}")
     else:
@@ -380,7 +416,12 @@ def main() -> int:
     subparsers.add_parser("auth", help="Interactive OAuth 2.1 PKCE authorization")
 
     # inspect
-    subparsers.add_parser("inspect", help="Inspect and sample MCP tool schemas")
+    inspect_parser = subparsers.add_parser("inspect", help="Inspect and sample MCP tool schemas")
+    inspect_parser.add_argument(
+        "--allow-raw-dump",
+        action="store_true",
+        help="Allow writing raw MCP tool responses to tmpfs (/run/user/$UID/inir-indmoney/raw_dump.json with 0600 mode)",
+    )
 
     # hydrate
     subparsers.add_parser("hydrate", help="Cold-boot tmpfs hydration from encrypted keyring")
@@ -417,3 +458,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

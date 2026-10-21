@@ -10,8 +10,9 @@ echo "=== Installing IndMoney Portfolio Widget for iNiR / iRiS ==="
 mkdir -p "$HOME/.local/bin"
 mkdir -p "$HOME/.config/user-tmpfiles.d"
 mkdir -p "$HOME/.config/systemd/user"
-mkdir -p "$HOME/.cache/inir/indmoney"
 mkdir -p "/run/user/$(id -u)/inir-indmoney"
+chmod 0700 "/run/user/$(id -u)/inir-indmoney" 2>/dev/null || true
+rm -rf "$HOME/.cache/inir/indmoney"
 
 # 2. Link CLI binary
 echo "[1/6] Installing indmoney-sync CLI to ~/.local/bin/..."
