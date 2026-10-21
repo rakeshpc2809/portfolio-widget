@@ -176,19 +176,10 @@ Item {
 
     MouseArea {
         anchors.fill: parent
-        cursorShape: Qt.PointingHandCursor
-        acceptedButtons: Qt.LeftButton | Qt.MiddleButton | Qt.RightButton
-        hoverEnabled: true
-
-        onEntered: root.hovered = true
-        onExited: root.hovered = false
-        onPressed: mouse => { root.pressed = true }
-        onReleased: mouse => { root.pressed = false }
+        acceptedButtons: Qt.MiddleButton | Qt.RightButton
 
         onClicked: mouse => {
-            if (mouse.button === Qt.LeftButton) {
-                root.activated()
-            } else if (mouse.button === Qt.MiddleButton) {
+            if (mouse.button === Qt.MiddleButton) {
                 IndMoneyService.togglePrivacy()
             } else if (mouse.button === Qt.RightButton) {
                 IndMoneyService.refresh()

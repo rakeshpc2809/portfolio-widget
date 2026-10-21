@@ -209,7 +209,6 @@ FACE_BLOCK = """/* INIR_INDMONEY_BEGIN:face */
         lane: root.lane
         hovered: root.hovered
         pressed: root.pressed
-        onActivated: root.clicked()
     }
 /* INIR_INDMONEY_END:face */"""
 
