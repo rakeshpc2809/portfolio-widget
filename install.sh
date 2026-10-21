@@ -83,31 +83,29 @@ if pieces_file.exists():
 bubble_file = inir_dir / "modules" / "iris" / "components" / "IrisBubbleFace.qml"
 if bubble_file.exists():
     content = bubble_file.read_text(encoding="utf-8")
-    if 'root.kind === "portfolio"' not in content:
-        # Add import if needed
-        if 'import qs.modules.iris.pieces' in content and 'import qs.modules.iris.cards' not in content:
-            pass
-        # Add Loader
-        portfolio_loader = '''        Loader {
-            anchors.fill: parent
-            active: root.kind === "portfolio"
-            sourceComponent: PortfolioPiece {
-                anchors.fill: parent
-                plated: root.plated
-                hovered: root.hovered
-                pressed: root.pressed
-                onActivated: root.clicked()
-            }
-        }
-'''
-        # Insert before Accessible.name
-        content = re.sub(r'(ResourceUsageMonitor\s*\{)', portfolio_loader + r'\1', content, count=1)
-        # Add to Accessible.name
-        content = content.replace('Accessible.name: root.kind === "controls"', 'Accessible.name: root.kind === "portfolio" ? Translation.tr("Portfolio")\n        : root.kind === "controls"')
+    if 'PortfolioPiece' not in content:
+        portfolio_comp = '''PortfolioPiece {
+            id: portfolioPiece
+            visible: root.kind === "portfolio"
+            anchors.centerIn: parent
+            screenName: root.screenName
+            plated: root.plated
+            hovered: root.hovered
+            pressed: root.pressed
+            onActivated: root.clicked()
+        }'''
+        if 'id: portfolioFace' in content:
+            content = re.sub(r'Item\s*\{\s*id:\s*portfolioFace.*?^\s*\}', portfolio_comp, content, flags=re.DOTALL | re.MULTILINE)
+        else:
+            content = re.sub(r'(ResourceUsageMonitor\s*\{)', '        ' + portfolio_comp + '\n' + r'\1', content, count=1)
+        if 'import qs.modules.iris.pieces' not in content:
+            content = "import qs.modules.iris.pieces\n" + content
+        if 'Accessible.name: root.kind === "portfolio"' not in content:
+            content = content.replace('Accessible.name: root.kind === "controls"', 'Accessible.name: root.kind === "portfolio" ? Translation.tr("Portfolio")\n        : root.kind === "controls"')
         bubble_file.write_text(content, encoding="utf-8")
-        print("  -> Patched IrisBubbleFace.qml (added portfolio bubble loader)")
+        print("  -> Patched IrisBubbleFace.qml (added PortfolioPiece)")
     else:
-        print("  -> IrisBubbleFace.qml already contains portfolio loader")
+        print("  -> IrisBubbleFace.qml already contains PortfolioPiece")
 
 # C. Patch IrisCardContent.qml
 card_file = inir_dir / "modules" / "iris" / "stage" / "IrisCardContent.qml"
