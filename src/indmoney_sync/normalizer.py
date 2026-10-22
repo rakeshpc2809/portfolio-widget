@@ -3,10 +3,11 @@
 import calendar
 import datetime
 import json
+import re
 import time
 from typing import Any
 
-from .config import AppConfig, get_default_config
+from .config import VALID_PALETTE_KEYS, AppConfig, get_default_config
 from .governor import IST, get_nominal_market_state
 
 # Verified IrisStyle.identity keys strictly:
@@ -17,6 +18,7 @@ BUCKET_PALETTE = {
     "gold_silver": "yellow",
     "liquid": "teal",
     "legacy": "gray",
+    "unassigned": "orange",
 }
 
 CLASS_PALETTE = {
@@ -147,29 +149,49 @@ def update_sparkline_90d(
     current_val: float,
     current_date_str: str,
     max_days: int = 90,
+    return_pct: float | None = None,
+    invested_val: float | None = None,
 ) -> list[dict[str, Any]]:
     """
-    Maintains a 90-point daily historical series: [{'date': 'YYYY-MM-DD', 'v': float}].
+    Maintains a 90-point daily historical series: [{'date': 'YYYY-MM-DD', 'v': float, ...}].
     Updates today's date in-place if already present, otherwise appends.
     """
     sparkline: list[dict[str, Any]] = []
     if isinstance(prev_sparkline, list):
         for pt in prev_sparkline:
             if isinstance(pt, dict) and "date" in pt and "v" in pt:
-                sparkline.append({"date": str(pt["date"]), "v": round(_safe_float(pt["v"]), 2)})
+                item: dict[str, Any] = {"date": str(pt["date"]), "v": round(_safe_float(pt["v"]), 2)}
+                if "return_pct" in pt:
+                    item["return_pct"] = round(_safe_float(pt["return_pct"]), 2)
+                if "wealth_index" in pt:
+                    item["wealth_index"] = round(_safe_float(pt["wealth_index"]), 4)
+                sparkline.append(item)
             elif isinstance(pt, dict) and "ts" in pt and "v" in pt:
                 d_str = datetime.datetime.fromtimestamp(pt["ts"], tz=IST).strftime("%Y-%m-%d")
                 sparkline.append({"date": d_str, "v": round(_safe_float(pt["v"]), 2)})
 
     val_rounded = round(current_val, 2)
+    wealth_index = round(current_val / invested_val, 4) if (invested_val and invested_val > 0) else None
+    ret_pct = round(return_pct, 2) if return_pct is not None else None
+
+    new_pt: dict[str, Any] = {"date": current_date_str, "v": val_rounded}
+    if ret_pct is not None:
+        new_pt["return_pct"] = ret_pct
+    if wealth_index is not None:
+        new_pt["wealth_index"] = wealth_index
+
     if not sparkline:
-        sparkline.append({"date": current_date_str, "v": val_rounded})
+        sparkline.append(new_pt)
     else:
         last_pt = sparkline[-1]
         if last_pt["date"] == current_date_str:
             last_pt["v"] = val_rounded
+            if ret_pct is not None:
+                last_pt["return_pct"] = ret_pct
+            if wealth_index is not None:
+                last_pt["wealth_index"] = wealth_index
         else:
-            sparkline.append({"date": current_date_str, "v": val_rounded})
+            sparkline.append(new_pt)
 
     return sparkline[-max_days:]
 
@@ -415,19 +437,32 @@ def classify_holding(
 
     if ov_bucket:
         bucket_id = ov_bucket.lower()
+        if bucket_id not in cfg.valid_bucket_ids():
+            bucket_id = "unassigned"
+    elif cfg.strict_map:
+        bucket_id = "unassigned"
     elif "legacy" in name_low:
         bucket_id = "legacy"
     elif any(k in name_low for k in ("liquid", "arbitrage", "overnight", "money market", "ultra short", "cash")):
         bucket_id = "liquid"
     elif class_id == "gold" or any(k in name_low for k in ("gold", "silver", "sgb")):
         bucket_id = "gold_silver"
-    elif any(k in name_low for k in ("flexi", "large", "nifty 50", "index", "bluechip", "focused", "multi asset")):
+    elif "large & mid" in name_low or "large and mid" in name_low:
         bucket_id = "core"
+    # Check Satellite / Factor / Sectoral BEFORE generic "index" so factor index funds don't leak into Core
     elif (
         class_id in ("in_eq", "us_eq")
-        or any(k in name_low for k in ("nasdaq", "small", "micro", "momentum", "tech", "us stock", "mid cap", "midcap"))
+        or any(
+            k in name_low
+            for k in (
+                "nasdaq", "small", "micro", "momentum", "value", "quality",
+                "alpha", "tech", "healthcare", "pharma", "us stock", "mid cap", "midcap",
+            )
+        )
     ):
         bucket_id = "satellite"
+    elif any(k in name_low for k in ("flexi", "large", "nifty 50", "sensex", "index", "bluechip", "focused", "multi asset")):
+        bucket_id = "core"
     else:
         bucket_id = "core"
 
@@ -445,17 +480,20 @@ def normalize_holdings(
     elif isinstance(raw_holdings, dict):
         holding_list = raw_holdings.get("holdings") or raw_holdings.get("data") or raw_holdings.get("items") or []
 
-    normalized_all: list[dict[str, Any]] = []
+    # Consolidate multiple folios by isin (or symbol if isin is empty)
+    merged_map: dict[str, dict[str, Any]] = {}
 
     for h in holding_list:
         if not isinstance(h, dict):
             continue
         symbol = str(h.get("symbol") or h.get("investment_code") or h.get("ticker") or h.get("isin") or "")
         name = str(h.get("name") or h.get("investment") or h.get("scheme_name") or h.get("company_name") or symbol)
+        # Strip trailing (Folio ...) from display name
+        clean_name = re.sub(r"\s*\(Folio\s*[^)]+\)", "", name, flags=re.IGNORECASE).strip()
         isin = str(h.get("isin") or "")
         raw_type = str(h.get("asset_type") or h.get("asset") or h.get("asset_class") or "MF")
 
-        class_id, bucket_id = classify_holding(symbol, name, isin, raw_type, config)
+        class_id, bucket_id = classify_holding(symbol, clean_name, isin, raw_type, config)
 
         val = _safe_float(h.get("market_value") or h.get("value_inr") or h.get("current_value") or h.get("value"))
         invested = _safe_float(h.get("invested_amount") or h.get("invested_inr") or h.get("invested_value") or h.get("buy_value"))
@@ -470,36 +508,76 @@ def normalize_holdings(
         day_pct = _safe_float(h.get("one_day_change_percentage") or h.get("day_pct") or h.get("day_change_pct"))
         if day_change_inr == 0.0 and day_pct != 0.0 and val > 0 and (100.0 + day_pct) > 0:
             day_change_inr = round(val * (day_pct / (100.0 + day_pct)), 2)
-        elif day_pct == 0.0 and val > 0 and (val - day_change_inr) > 0:
-            day_pct = round((day_change_inr / (val - day_change_inr)) * 100.0, 2)
 
-        total_pct = _safe_float(h.get("pnl_per") or h.get("total_pct") or h.get("total_pnl_pct") or h.get("return_percentage"))
-        if total_pct == 0.0 and invested > 0 and val > 0:
-            total_pct = round(((val - invested) / invested) * 100.0, 2)
+        raw_total_pct = _safe_float(h.get("pnl_per") or h.get("total_pct") or h.get("total_pnl_pct") or h.get("return_percentage"))
 
-        palette_key = BUCKET_PALETTE.get(bucket_id, "blue")
+        if val <= 0 and invested <= 0:
+            continue
 
-        if val > 0 or invested > 0:
-            item = {
+        group_key = isin.strip().upper() if isin.strip() else symbol.strip().upper()
+        if not group_key:
+            group_key = clean_name.strip().lower()
+
+        if group_key in merged_map:
+            entry = merged_map[group_key]
+            entry["current_value_inr"] += val
+            entry["invested_value_inr"] += invested
+            entry["one_day_change_inr"] += day_change_inr
+        else:
+            merged_map[group_key] = {
                 "symbol": symbol,
-                "name": name,
+                "name": clean_name,
                 "isin": isin,
                 "class_id": class_id,
                 "bucket_id": bucket_id,
-                "current_value_inr": round(val, 2),
-                "invested_value_inr": round(invested, 2),
-                "one_day_change_inr": round(day_change_inr, 2),
-                "one_day_change_pct": round(day_pct, 2),
-                "total_return_pct": round(total_pct, 2),
-                "palette_key": palette_key,
-                # Legacy compatibility aliases
-                "asset": class_id.upper(),
-                "value_inr": round(val, 2),
-                "invested_inr": round(invested, 2),
-                "day_pct": round(day_pct, 2),
-                "day_change_inr": round(day_change_inr, 2),
+                "current_value_inr": val,
+                "invested_value_inr": invested,
+                "one_day_change_inr": day_change_inr,
+                "raw_total_pct": raw_total_pct,
             }
-            normalized_all.append(item)
+
+    cfg = config or get_default_config()
+    custom_palette = {b.id: b.color for b in cfg.buckets if b.color in VALID_PALETTE_KEYS}
+
+    normalized_all: list[dict[str, Any]] = []
+    for entry in merged_map.values():
+        val = round(entry["current_value_inr"], 2)
+        invested = round(entry["invested_value_inr"], 2)
+        day_change_inr = round(entry["one_day_change_inr"], 2)
+
+        day_pct = 0.0
+        if val > 0 and (val - day_change_inr) > 0:
+            day_pct = round((day_change_inr / (val - day_change_inr)) * 100.0, 2)
+
+        total_pct = 0.0
+        if invested > 0:
+            total_pct = round(((val - invested) / invested) * 100.0, 2)
+        elif entry.get("raw_total_pct"):
+            total_pct = round(entry["raw_total_pct"], 2)
+
+        b_id = entry["bucket_id"]
+        palette_key = custom_palette.get(b_id) or BUCKET_PALETTE.get(b_id, "blue")
+
+        item = {
+            "symbol": entry["symbol"],
+            "name": entry["name"],
+            "isin": entry["isin"],
+            "class_id": entry["class_id"],
+            "bucket_id": entry["bucket_id"],
+            "current_value_inr": val,
+            "invested_value_inr": invested,
+            "one_day_change_inr": day_change_inr,
+            "one_day_change_pct": day_pct,
+            "total_return_pct": total_pct,
+            "palette_key": palette_key,
+            # Legacy compatibility aliases
+            "asset": entry["class_id"].upper(),
+            "value_inr": val,
+            "invested_inr": invested,
+            "day_pct": day_pct,
+            "day_change_inr": day_change_inr,
+        }
+        normalized_all.append(item)
 
     normalized_all.sort(key=lambda x: x["current_value_inr"], reverse=True)
     movers = sorted(normalized_all, key=lambda x: abs(x["one_day_change_pct"]), reverse=True)[:5]
@@ -631,39 +709,56 @@ def compute_buckets(
     config: AppConfig | None = None,
 ) -> list[dict[str, Any]]:
     cfg = config or get_default_config()
-    targets = cfg.bucket_targets
+    specs = cfg.buckets
 
-    buckets_spec = [
-        ("core", "Core"),
-        ("satellite", "Satellite"),
-        ("gold_silver", "Gold & Silver"),
-        ("liquid", "Liquid / Cash"),
-        ("legacy", "Legacy"),
-    ]
+    totals: dict[str, float] = {b.id: 0.0 for b in specs}
+    unassigned_val = 0.0
 
-    totals: dict[str, float] = {b_id: 0.0 for b_id, _ in buckets_spec}
     for h in holdings:
         b_id = h.get("bucket_id", "core")
         val = h.get("current_value_inr", 0.0)
-        totals[b_id] = totals.get(b_id, 0.0) + val
+        if b_id in totals:
+            totals[b_id] += val
+        else:
+            unassigned_val += val
+            h["bucket_id"] = "unassigned"
 
     out = []
-    for b_id, label in buckets_spec:
-        val = totals[b_id]
+    for spec in specs:
+        val = totals.get(spec.id, 0.0)
         actual_pct = round((val / invested_total_inr * 100.0), 1) if invested_total_inr > 0 else 0.0
-        target_pct = targets.get_target(b_id)
+        target_pct = spec.target
+        band_pct = spec.band
         drift_pct = round(actual_pct - target_pct, 1)
-        in_band = abs(drift_pct) <= targets.drift_tolerance_pct if target_pct > 0 else (val == 0.0)
+        in_band = abs(drift_pct) <= band_pct if target_pct > 0 else (val == 0.0)
+        rebalance_inr = round(((target_pct / 100.0) * invested_total_inr) - val, 2) if target_pct > 0 else -round(val, 2)
 
         out.append({
-            "bucket_id": b_id,
-            "label": label,
+            "bucket_id": spec.id,
+            "label": spec.label,
             "current_value_inr": round(val, 2),
             "actual_pct": actual_pct,
             "target_pct": target_pct,
+            "band_pct": band_pct,
             "drift_pct": drift_pct,
+            "rebalance_inr": rebalance_inr,
             "in_band": in_band,
-            "palette_key": BUCKET_PALETTE[b_id],
+            "palette_key": spec.color if spec.color in VALID_PALETTE_KEYS else BUCKET_PALETTE.get(spec.id, "blue"),
+        })
+
+    if unassigned_val > 0:
+        actual_pct = round((unassigned_val / invested_total_inr * 100.0), 1) if invested_total_inr > 0 else 0.0
+        out.append({
+            "bucket_id": "unassigned",
+            "label": "Unassigned",
+            "current_value_inr": round(unassigned_val, 2),
+            "actual_pct": actual_pct,
+            "target_pct": 0.0,
+            "band_pct": 0.0,
+            "drift_pct": actual_pct,
+            "rebalance_inr": -round(unassigned_val, 2),
+            "in_band": False,
+            "palette_key": "orange",
         })
 
     return out
@@ -680,7 +775,15 @@ def compute_attention_items(
     items: list[dict[str, Any]] = []
 
     for b in buckets:
-        if not b["in_band"] and b["target_pct"] > 0:
+        if b.get("bucket_id") == "unassigned" and b.get("current_value_inr", 0) > 0:
+            items.append({
+                "type": "band_breach",
+                "severity": "warning",
+                "title": "Unassigned Holdings Alert",
+                "message": f"₹{b['current_value_inr']:,.0f} in holdings are unassigned to any strategic bucket.",
+                "palette_key": "orange",
+            })
+        elif not b["in_band"] and b["target_pct"] > 0:
             direction = "Overweight" if b["drift_pct"] > 0 else "Underweight"
             items.append({
                 "type": "band_breach",
@@ -815,6 +918,8 @@ def build_normalized_state(
         current_val=invested_curr,
         current_date_str=today_str,
         max_days=90,
+        return_pct=total_ret_pct,
+        invested_val=invested_inv,
     )
 
     nav_as_of = None
@@ -826,12 +931,15 @@ def build_normalized_state(
     elif status == "partial":
         freshness = "partial"
     else:
-        last_updated_ts = prev_state.get("updated_at") if isinstance(prev_state, dict) else None
-        age = (updated_at - int(last_updated_ts)) if last_updated_ts else 0
-        if age > 24 * 3600:
-            freshness = "stale"
-        elif age > 8 * 3600:
-            freshness = "aging"
+        nav_date = parse_date(str(nav_as_of)) if nav_as_of else None
+        if nav_date:
+            nav_age_days = (today_date - nav_date).days
+            if nav_age_days > 5:
+                freshness = "stale"
+            elif nav_age_days > 3:
+                freshness = "aging"
+            else:
+                freshness = "fresh"
         else:
             freshness = "fresh"
 

@@ -1,37 +1,58 @@
 # portfolio-widget Configuration (~/.config/inir/indmoney/config.toml)
 # Schema Version: 2
 
-[targets]
-# Bucket and target drift rebalancing logic is optional. Set enabled = true to track bucket drift.
-enabled = false
-# Target allocation percentage bands across portfolio buckets
-Core = 50.0
-Satellite = 30.0
-Gold_Silver = 10.0
-Liquid = 10.0
-# Drift tolerance percentage (+/-) before an attention alert is triggered
-drift_tolerance_pct = 2.5
+strict_map = false
+emergency_buffer_inr = 100000.0
+
+[[buckets]]
+id = "core"
+label = "Core Wealth"
+target = 50.0
+band = 5.0
+color = "blue"
+
+[[buckets]]
+id = "satellite"
+label = "Satellite / Factor"
+target = 30.0
+band = 3.0
+color = "purple"
+
+[[buckets]]
+id = "gold_silver"
+label = "Precious Metals"
+target = 10.0
+band = 2.5
+color = "yellow"
+
+[[buckets]]
+id = "liquid"
+label = "Liquid & Arbitrage"
+target = 10.0
+band = 2.5
+color = "teal"
+
+[[buckets]]
+id = "legacy"
+label = "Legacy"
+target = 0.0
+band = 0.0
+color = "gray"
+
+[map]
+# Deterministic ISIN or Symbol -> bucket_id mapping
+"INF879O01019" = "core"
+"INF109K012R6" = "core"
+"INF200K01UT7" = "core"
+"INF247L01AU4" = "satellite"
+"INF209K01157" = "liquid"
 
 [polling]
-# Mutual fund portfolios (typically >80% weight) default to NAV-aware publication windows:
-# 21:30–23:30 IST and 07:30–09:30 IST.
-# Intraday polling during active market hours is only triggered if direct equity weight
-# exceeds the threshold below AND intraday_equity_polling is enabled.
+# Mutual fund portfolios default to NAV publication windows (07:30-09:30 & 21:30-23:30 IST).
 intraday_equity_polling = false
 equity_weight_threshold_pct = 5.0
 
 [overrides]
-# Map upstream quirks to deterministic class_id and bucket_id
-# Keys can be ISIN, stock ticker / symbol, or fund name substring (matched case-insensitively).
-# class_id: "mf" | "in_eq" | "us_eq" | "cash" | "epf" | "gold"
-# bucket_id: "core" | "satellite" | "gold_silver" | "liquid" | "legacy"
-
-# Example 1: Nasdaq-100 ETF arriving from upstream broker as a "small cap stock"
+# Optional fallback rules matching ISIN, symbol, or fund name substring
 "MON100" = { class_id = "us_eq", bucket_id = "satellite" }
-"INF247L01AU4" = { class_id = "us_eq", bucket_id = "satellite" }
-
-# Example 2: Arbitrage fund incorrectly classified as "Others"
 "arbitrage" = { class_id = "mf", bucket_id = "liquid" }
-
-# Example 3: Legacy or illiquid stock to track under legacy bucket
-"SUZLON" = { class_id = "in_eq", bucket_id = "legacy" }

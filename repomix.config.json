@@ -1,0 +1,25 @@
+{
+  "$schema": "https://repomix.com/config.schema.json",
+  "output": {
+    "filePath": "repomix-output.xml",
+    "style": "xml",
+    "parsableStyle": true,
+    "fileSummary": true,
+    "directoryStructure": true,
+    "showLineNumbers": true,
+    "instructionFilePath": "review-instructions-gemini-argon.md",
+    "topFilesLength": 5
+  },
+  "ignore": {
+    "useGitignore": true,
+    "useDefaultPatterns": true,
+    "customPatterns": [
+      "repomix-output.xml",
+      "repomix.config.json",
+      "review-instructions-gemini-argon.md"
+    ]
+  },
+  "security": {
+    "enableSecurityCheck": true
+  }
+}

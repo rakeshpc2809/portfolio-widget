@@ -117,6 +117,13 @@ class TestCliAndSecurity(unittest.TestCase):
             self.assertEqual(saved_state["status"], "partial")
             self.assertIn("us_stocks_sips", saved_state["failed_sources"])
 
+            # Verify private 0o600 permissions on tmpfs state and sips files
+            file_mode = oct(state_file.stat().st_mode & 0o777)
+            self.assertEqual(file_mode, "0o600")
+            if sips_file.exists():
+                sips_mode = oct(sips_file.stat().st_mode & 0o777)
+                self.assertEqual(sips_mode, "0o600")
+
 
 if __name__ == "__main__":
     unittest.main()

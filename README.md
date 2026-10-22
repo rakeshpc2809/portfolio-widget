@@ -74,13 +74,11 @@ The interface follows the iRiS design language (`IrisStyle`), using slot-rolling
   - **View 1 (Holdings):** Full portfolio holdings filterable by category chips (`ALL`, `CORE`, `SATELLITE`, `GOLD_SILVER`, `LIQUID`).
   - **View 2 (SIP Schedule):** Chronological upcoming schedule with frequency, date, amount, and asset class badges.
 - **Keyboard Navigation (`M7`):**
-  - `1`: Switch to Holdings View
-  - `2`: Switch to SIP Schedule View
-  - `3` / `D`: Toggle Drill-Down Drawer
-  - `Tab`: Cycle bucket category filters
-  - `Q`: Toggle Quiet Mode
-  - `P`: Toggle Privacy Mode
-  - `R`: Trigger immediate background sync
+  - `1`–`5`: Toggle inline holdings drawer for Bucket 1–5
+  - `S`: Toggle upcoming SIP schedule & bank buffer drawer
+  - `P`: Toggle Privacy Mode (`₹ ••••••`)
+  - `R`: Trigger immediate background sync (`indmoney-sync fetch --force`)
+  - `Esc`: Collapse all open drawers
 
 ---
 
@@ -101,42 +99,67 @@ The interface follows the iRiS design language (`IrisStyle`), using slot-rolling
 
 ## Strategy Configuration (`config.toml`)
 
-Customize asset allocation targets, tolerances, and governor behavior via `~/.config/inir/indmoney.toml` (copy from `config.example.toml`):
+Customize asset allocation targets, tolerances, deterministic maps, and governor behavior via `~/.config/inir/indmoney/config.toml` (copy from `config.example.toml`):
 
 ```toml
-[strategy]
-# Total target allocations must equal 100%
-tolerance_pct = 2.5 # Band threshold (e.g. ±2.5%)
+# portfolio-widget Configuration (~/.config/inir/indmoney/config.toml)
+# Schema Version: 2
 
-[[strategy.buckets]]
+strict_map = false
+emergency_buffer_inr = 100000.0
+
+[[buckets]]
 id = "core"
 label = "Core Wealth"
-target_pct = 50.0
-palette_key = "blue" # Verified IrisStyle.identity key
+target = 50.0
+band = 5.0
+color = "blue"
 
-[[strategy.buckets]]
+[[buckets]]
 id = "satellite"
-label = "Growth / Alpha"
-target_pct = 30.0
-palette_key = "purple"
+label = "Satellite / Factor"
+target = 30.0
+band = 3.0
+color = "purple"
 
-[[strategy.buckets]]
+[[buckets]]
 id = "gold_silver"
 label = "Precious Metals"
-target_pct = 10.0
-palette_key = "yellow"
+target = 10.0
+band = 2.5
+color = "yellow"
 
-[[strategy.buckets]]
+[[buckets]]
 id = "liquid"
-label = "Cash & Arbitrage"
-target_pct = 10.0
-palette_key = "teal"
+label = "Liquid & Arbitrage"
+target = 10.0
+band = 2.5
+color = "teal"
 
-[governor]
-# Market-hours polling configuration
-nav_morning_window = "07:30-09:30"
-nav_evening_window = "21:30-23:30"
-equity_weight_threshold_pct = 15.0 # Minimum equity weight to poll during active market hours
+[[buckets]]
+id = "legacy"
+label = "Legacy"
+target = 0.0
+band = 0.0
+color = "gray"
+
+[map]
+# Deterministic ISIN or Symbol -> bucket_id mapping
+"INF879O01019" = "core"
+"INF109K012R6" = "core"
+"INF200K01UT7" = "core"
+"INF247L01AU4" = "satellite"
+"INF209K01157" = "liquid"
+
+[polling]
+# Mutual fund portfolios default to NAV publication windows (07:30-09:30 & 21:30-23:30 IST).
+intraday_equity_polling = false
+equity_weight_threshold_pct = 5.0
+
+[overrides]
+# Optional fallback rules matching ISIN, symbol, or fund name substring
+"MON100" = { class_id = "us_eq", bucket_id = "satellite" }
+"arbitrage" = { class_id = "mf", bucket_id = "liquid" }
 ```
 
 ---

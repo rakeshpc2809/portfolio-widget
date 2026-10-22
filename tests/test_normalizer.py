@@ -313,6 +313,139 @@ class TestNormalizer(unittest.TestCase):
         self.assertEqual(len(capped), 90)
         self.assertEqual(capped[-1]["v"], 3000000.0)
 
+    def test_factor_index_classified_as_satellite_not_core(self):
+        """Verifies that factor and microcap index funds are classified into Satellite, not trapped in Core."""
+        from indmoney_sync.normalizer import classify_holding
+
+        # Factor indices
+        _, b1 = classify_holding("NIFTY200VAL", "UTI Nifty200 Value 30 Index Fund", "", "MF")
+        self.assertEqual(b1, "satellite")
+
+        _, b2 = classify_holding("NIFTY500MOM", "Motilal Oswal Nifty500 Multicap Momentum Quality 50 Index Fund", "", "MF")
+        self.assertEqual(b2, "satellite")
+
+        _, b3 = classify_holding("MICRO250", "Motilal Oswal Nifty Microcap 250 Index Fund", "", "MF")
+        self.assertEqual(b3, "satellite")
+
+        # Standard large / flexi / large & midcap indices & active funds
+        _, b4 = classify_holding("NIFTY50", "ICICI Prudential Nifty 50 Index Fund", "", "MF")
+        self.assertEqual(b4, "core")
+
+        _, b5 = classify_holding("MIRAE_LM", "Mirae Asset Large & Midcap Fund", "", "MF")
+        self.assertEqual(b5, "core")
+
+        _, b6 = classify_holding("PPFAS", "Parag Parikh Flexi Cap Fund", "", "MF")
+        self.assertEqual(b6, "core")
+
+    def test_multi_folio_holdings_consolidated_by_isin(self):
+        """Verifies multi-folio mutual funds are consolidated by ISIN, summing values and stripping folio suffix."""
+        raw = [
+            {
+                "isin": "INF879O01019",
+                "name": "Parag Parikh Flexi Cap Fund - Direct Growth (Folio 101)",
+                "market_value": 750000.0,
+                "invested_amount": 600000.0,
+                "one_day_change": -4500.0,
+            },
+            {
+                "isin": "INF879O01019",
+                "name": "Parag Parikh Flexi Cap Fund - Direct Growth (Folio 102)",
+                "market_value": 250000.0,
+                "invested_amount": 200000.0,
+                "one_day_change": -1500.0,
+            },
+        ]
+        holdings, _ = normalize_holdings(raw)
+        self.assertEqual(len(holdings), 1)
+        h = holdings[0]
+        self.assertEqual(h["isin"], "INF879O01019")
+        self.assertEqual(h["name"], "Parag Parikh Flexi Cap Fund - Direct Growth")
+        self.assertEqual(h["current_value_inr"], 1000000.0)
+        self.assertEqual(h["invested_value_inr"], 800000.0)
+        self.assertEqual(h["one_day_change_inr"], -6000.0)
+        self.assertEqual(h["total_return_pct"], 25.0)
+
+    def test_typo_bucket_override_routes_to_unassigned_with_alert(self):
+        """Verifies that an override with a typo'd bucket_id routes to unassigned and raises an attention alert."""
+        from indmoney_sync.config import AppConfig, OverrideRule
+        from indmoney_sync.normalizer import compute_attention_items, compute_buckets
+
+        cfg = AppConfig(
+            overrides={"TYPO_FUND": OverrideRule(class_id="mf", bucket_id="satelite")}
+        )
+        holdings = [
+            {"symbol": "TYPO_FUND", "name": "Typo Fund", "bucket_id": "unassigned", "current_value_inr": 100000.0}
+        ]
+        buckets = compute_buckets(holdings, invested_total_inr=100000.0, config=cfg)
+        unassigned = next((b for b in buckets if b["bucket_id"] == "unassigned"), None)
+        self.assertIsNotNone(unassigned)
+        self.assertEqual(unassigned["current_value_inr"], 100000.0)
+        self.assertEqual(unassigned["actual_pct"], 100.0)
+        self.assertFalse(unassigned["in_band"])
+        self.assertEqual(unassigned["rebalance_inr"], -100000.0)
+
+        alerts = compute_attention_items(buckets, sips_data={}, bank_balance_inr=50000.0, status="ok", freshness="fresh", failed_sources=[])
+        self.assertTrue(any("Unassigned" in a["title"] for a in alerts))
+
+    def test_custom_bucket_palette_propagation(self):
+        """Verifies custom bucket colors from VALID_PALETTE_KEYS propagate to holdings and buckets."""
+        from indmoney_sync.config import AppConfig, BucketSpec
+        from indmoney_sync.normalizer import compute_buckets
+
+        cfg = AppConfig(
+            buckets=[
+                BucketSpec(id="core", label="Core", target=70.0, band=5.0, color="indigo"),
+                BucketSpec(id="satellite", label="Satellite", target=30.0, band=5.0, color="lavender"),
+            ],
+            isin_map={"INF879O01019": "core"},
+        )
+        raw = [
+            {
+                "isin": "INF879O01019",
+                "name": "Parag Parikh Flexi Cap Fund",
+                "market_value": 70000.0,
+                "invested_amount": 50000.0,
+            }
+        ]
+        holdings, _ = normalize_holdings(raw, config=cfg)
+        self.assertEqual(len(holdings), 1)
+        self.assertEqual(holdings[0]["palette_key"], "indigo")
+
+        buckets = compute_buckets(holdings, invested_total_inr=70000.0, config=cfg)
+        core_b = next(b for b in buckets if b["bucket_id"] == "core")
+        self.assertEqual(core_b["palette_key"], "indigo")
+
+    def test_nav_date_freshness_evaluation(self):
+        """Verifies that freshness evaluates nav_as_of date age (fresh <= 3d, aging 4-5d, stale > 5d)."""
+        ref_dt = datetime.datetime(2026, 10, 23, 10, 0, 0, tzinfo=datetime.timezone.utc)
+
+        # 1 day old NAV -> fresh
+        st_fresh = build_normalized_state(
+            snapshot={"nav_as_of": "2026-10-22"},
+            allocation={},
+            holdings=[],
+            reference_time=ref_dt,
+        )
+        self.assertEqual(st_fresh["freshness"], "fresh")
+
+        # 4 days old NAV -> aging
+        st_aging = build_normalized_state(
+            snapshot={"nav_as_of": "2026-10-19"},
+            allocation={},
+            holdings=[],
+            reference_time=ref_dt,
+        )
+        self.assertEqual(st_aging["freshness"], "aging")
+
+        # 7 days old NAV -> stale
+        st_stale = build_normalized_state(
+            snapshot={"nav_as_of": "2026-10-16"},
+            allocation={},
+            holdings=[],
+            reference_time=ref_dt,
+        )
+        self.assertEqual(st_stale["freshness"], "stale")
+
 
 if __name__ == "__main__":
     unittest.main()

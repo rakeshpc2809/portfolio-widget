@@ -16,12 +16,26 @@ def get_mock_state(reference_time: datetime.datetime | None = None) -> dict[str,
 
     # Generate 90 realistic daily historical sparkline points leading up to today
     base_val = 3450000.00
+    base_inv = 3000000.00
     sparkline_90d = []
     for day_idx in range(90, 0, -1):
         dt = today_date - datetime.timedelta(days=day_idx)
         val = base_val + (90 - day_idx) * 15000.0 + ((day_idx * 13) % 25000)
-        sparkline_90d.append({"date": dt.strftime("%Y-%m-%d"), "v": round(val, 2)})
-    sparkline_90d.append({"date": today_date.strftime("%Y-%m-%d"), "v": 4825190.50})
+        inv = base_inv + (90 - day_idx) * 6500.0
+        ret_pct = round(((val - inv) / inv) * 100.0, 2)
+        w_idx = round(val / inv, 4)
+        sparkline_90d.append({
+            "date": dt.strftime("%Y-%m-%d"),
+            "v": round(val, 2),
+            "return_pct": ret_pct,
+            "wealth_index": w_idx,
+        })
+    sparkline_90d.append({
+        "date": today_date.strftime("%Y-%m-%d"),
+        "v": 4825190.50,
+        "return_pct": 33.66,
+        "wealth_index": round(4825190.50 / 3610000.00, 4),
+    })
 
     return {
         "schema_version": 2,
@@ -52,7 +66,9 @@ def get_mock_state(reference_time: datetime.datetime | None = None) -> dict[str,
                 "current_value_inr": 2420000.00,
                 "actual_pct": 50.15,
                 "target_pct": 50.0,
+                "band_pct": 5.0,
                 "drift_pct": 0.15,
+                "rebalance_inr": -7404.75,
                 "in_band": True,
                 "palette_key": "blue",
             },
@@ -62,7 +78,9 @@ def get_mock_state(reference_time: datetime.datetime | None = None) -> dict[str,
                 "current_value_inr": 1455190.50,
                 "actual_pct": 30.16,
                 "target_pct": 30.0,
+                "band_pct": 3.0,
                 "drift_pct": 0.16,
+                "rebalance_inr": -7633.35,
                 "in_band": True,
                 "palette_key": "purple",
             },
@@ -72,7 +90,9 @@ def get_mock_state(reference_time: datetime.datetime | None = None) -> dict[str,
                 "current_value_inr": 480000.00,
                 "actual_pct": 9.95,
                 "target_pct": 10.0,
+                "band_pct": 2.5,
                 "drift_pct": -0.05,
+                "rebalance_inr": 2519.05,
                 "in_band": True,
                 "palette_key": "yellow",
             },
@@ -82,7 +102,9 @@ def get_mock_state(reference_time: datetime.datetime | None = None) -> dict[str,
                 "current_value_inr": 470000.00,
                 "actual_pct": 9.74,
                 "target_pct": 10.0,
+                "band_pct": 2.5,
                 "drift_pct": -0.26,
+                "rebalance_inr": 12519.05,
                 "in_band": True,
                 "palette_key": "teal",
             },

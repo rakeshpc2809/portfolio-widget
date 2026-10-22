@@ -98,6 +98,62 @@ equity_weight_threshold_pct = 8.5
         self.assertEqual(cfg.bucket_targets.core, 50.0)
         self.assertEqual(len(cfg.overrides), 0)
 
+    def test_dynamic_buckets_and_map_parsing(self):
+        """Verifies parsing of [[buckets]] and [map] in TOML configuration."""
+        toml_content = b"""
+[[buckets]]
+id = "core"
+label = "Core Wealth"
+target = 60.0
+band = 3.0
+color = "blue"
+
+[[buckets]]
+id = "satellite"
+label = "Factor Growth"
+target = 30.0
+band = 2.0
+color = "purple"
+
+[[buckets]]
+id = "liquid"
+label = "Liquid Cash"
+target = 10.0
+band = 1.0
+color = "teal"
+
+[map]
+"INF879O01019" = "core"
+"INF247L01AU4" = "satellite"
+
+strict_map = true
+emergency_buffer_inr = 100000.0
+"""
+        with tempfile.NamedTemporaryFile(suffix=".toml", delete=False) as tmp:
+            tmp.write(toml_content)
+            tmp_path = Path(tmp.name)
+
+        try:
+            cfg = load_config(tmp_path)
+            self.assertEqual(len(cfg.buckets), 3)
+            self.assertEqual(cfg.buckets[0].id, "core")
+            self.assertEqual(cfg.buckets[0].target, 60.0)
+            self.assertEqual(cfg.buckets[0].band, 3.0)
+            self.assertEqual(cfg.buckets[0].color, "blue")
+            self.assertTrue(cfg.strict_map)
+            self.assertEqual(cfg.emergency_buffer_inr, 100000.0)
+
+            # Check [map] lookup via find_override
+            ov_core = cfg.find_override(isin="INF879O01019")
+            self.assertIsNotNone(ov_core)
+            self.assertEqual(ov_core.bucket_id, "core")
+
+            ov_sat = cfg.find_override(isin="INF247L01AU4")
+            self.assertIsNotNone(ov_sat)
+            self.assertEqual(ov_sat.bucket_id, "satellite")
+        finally:
+            tmp_path.unlink()
+
 
 class TestSchemaV2Validation(unittest.TestCase):
     def setUp(self):

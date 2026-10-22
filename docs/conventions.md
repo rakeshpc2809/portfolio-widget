@@ -237,96 +237,23 @@ This document establishes ground-truth conventions, exact token definitions, dyn
 
 ---
 
-## 5. W0.5 Security & Baseline Audit
+## 5. Security & Baseline Audit (Resolved & Clean Baseline)
 
-### Code Audit: Unencrypted Disk Writes
-1. **`src/indmoney_sync/cli.py` (lines 30, 34, 253-288):**
-   - Writes `sips_cache.json` in plaintext to `~/.cache/inir/indmoney/sips_cache.json`.
-   - Contains raw upcoming SIP amounts, fund names, and deduction dates.
-2. **`src/indmoney_sync/inspector.py` (lines 9-10, 48-52):**
-   - Writes `raw_dump.json` in plaintext to `~/.cache/inir/indmoney/raw_dump.json`.
-   - Dumps entire unscrubbed IndMoney portfolio, account holdings, bank balances, and ISINs.
-3. **`install.sh` (line 13):**
-   - Creates `mkdir -p "$HOME/.cache/inir/indmoney"`.
-4. **`systemd/inir-indmoney-sync.service` (line 12):**
-   - Exposes `%h/.cache/inir/indmoney` in `ReadWritePaths`.
+### Security Architecture: Zero Plaintext on Disk & Mode 0600
+1. **RAM Tmpfs Isolation:**
+   - All state (`state.json`), SIP cache (`sips_cache.json`), and raw inspector dumps (`raw_dump.json`) are stored exclusively in `/run/user/$UID/inir-indmoney/`.
+   - Runtime directory is initialized with mode `0o700` (`cli.py:ensure_dirs()`).
+   - All JSON files are written with atomic temporary files and restricted `0o600` file modes (`cli.py:_write_private_json()`).
+2. **Encrypted Keyring Backup:**
+   - Persistent portfolio state and SIP cache are saved to the OS Keyring (libsecret).
+   - Cold-boot hydration (`indmoney-sync hydrate`) restores state into tmpfs with zero unencrypted disk leaks.
+3. **Legacy Cache Purge:**
+   - `ensure_dirs()` automatically verifies and purges any legacy `~/.cache/inir/indmoney/` directories.
 
-### Live Disk Scan Output (`find ~/.cache/inir -type f`)
-```
-/home/rakeshpc/.cache/inir/abi-check
-/home/rakeshpc/.cache/inir/region-sampling/71b997af2fcb66da252abdb1ac0ed4d336ce74e5.lock
-/home/rakeshpc/.cache/inir/region-sampling/71b997af2fcb66da252abdb1ac0ed4d336ce74e5.npy
-/home/rakeshpc/.cache/inir/region-sampling/beb0fbfbf8ba4a5ff286f9b325f2fae895c5573b.lock
-/home/rakeshpc/.cache/inir/region-sampling/0debe16951c8703c0620b32508197f5eb8ec532d.lock
-/home/rakeshpc/.cache/inir/region-sampling/0debe16951c8703c0620b32508197f5eb8ec532d.npy
-/home/rakeshpc/.cache/inir/region-sampling/beb0fbfbf8ba4a5ff286f9b325f2fae895c5573b.npy
-/home/rakeshpc/.cache/inir/region-sampling/4341a98396590019b013907492860adc04cd76ca.lock
-/home/rakeshpc/.cache/inir/region-sampling/4341a98396590019b013907492860adc04cd76ca.npy
-/home/rakeshpc/.cache/inir/region-sampling/9294d1f3ab51a25d83d1c158f5d5fdf45a4bdf7f.lock
-/home/rakeshpc/.cache/inir/region-sampling/9294d1f3ab51a25d83d1c158f5d5fdf45a4bdf7f.npy
-/home/rakeshpc/.cache/inir/region-sampling/6619d60408b383c90ca2b37570486e29d2083530.lock
-/home/rakeshpc/.cache/inir/region-sampling/6619d60408b383c90ca2b37570486e29d2083530.npy
-/home/rakeshpc/.cache/inir/region-sampling/dfd0a4629bc308b933de34aa04d462f5393c070c.lock
-/home/rakeshpc/.cache/inir/region-sampling/dfd0a4629bc308b933de34aa04d462f5393c070c.npy
-/home/rakeshpc/.cache/inir/region-sampling/dc2a481ad3e8efcaf94a9c739e3d8c36a1fe17be.lock
-/home/rakeshpc/.cache/inir/region-sampling/dc2a481ad3e8efcaf94a9c739e3d8c36a1fe17be.npy
-/home/rakeshpc/.cache/inir/thumbgen.log
-/home/rakeshpc/.cache/inir/window-previews/.niri-session
-/home/rakeshpc/.cache/inir/indmoney/sips_cache.json
-/home/rakeshpc/.cache/inir/indmoney/raw_dump.json
-/home/rakeshpc/.cache/inir/last-boot.json
-```
-**Finding:** Both `~/.cache/inir/indmoney/sips_cache.json` and `~/.cache/inir/indmoney/raw_dump.json` are present on disk in plaintext.
-
-### Baseline Test Suite Audit Output
+### Test Suite Baseline: 100% Green
 **Command:** `pytest -v` (version: `pytest 9.1.1` on Python `3.14.8`)
 ```
-============================= test session starts ==============================
-platform linux -- Python 3.14.8, pytest-9.1.1, pluggy-1.7.0 -- /usr/bin/python
-cachedir: .pytest_cache
-rootdir: /home/rakeshpc/Projects/portfolio-widget
-configfile: pyproject.toml
-testpaths: tests
-plugins: anyio-4.15.1, platformdirs-4.13.0
-collecting ... collected 21 items
-
-tests/test_governor.py::TestGovernor::test_dynamic_holiday_lookup_with_holidays_mock PASSED [  4%]
-tests/test_governor.py::TestGovernor::test_dynamic_holiday_lookup_without_holidays_pkg PASSED [  9%]
-tests/test_governor.py::TestGovernor::test_force_always_fetches PASSED   [ 14%]
-tests/test_governor.py::TestGovernor::test_indian_market_hours_normal_day PASSED [ 19%]
-tests/test_governor.py::TestGovernor::test_market_closed_off_hours PASSED [ 23%]
-tests/test_governor.py::TestGovernor::test_no_hardcoded_year_constants_in_governor PASSED [ 28%]
-tests/test_governor.py::TestGovernor::test_opening_bell_window_transition_resets_streak_and_fetches PASSED [ 33%]
-tests/test_governor.py::TestGovernor::test_unchanged_streak_auto_backoff_in_market PASSED [ 38%]
-tests/test_governor.py::TestGovernor::test_unchanged_streak_auto_backoff_us_market PASSED [ 42%]
-tests/test_governor.py::TestGovernor::test_us_market_hours_normal_day PASSED [ 47%]
-tests/test_governor.py::TestGovernor::test_weekend_hours PASSED          [ 52%]
-tests/test_normalizer.py::TestNormalizer::test_build_normalized_state_integrates_sparkline PASSED [ 57%]
-tests/test_normalizer.py::TestNormalizer::test_build_normalized_state_unchanged_streak FAILED [ 61%]
-tests/test_normalizer.py::TestNormalizer::test_build_normalized_state_window_transition_resets_streak FAILED [ 66%]
-tests/test_normalizer.py::TestNormalizer::test_normalize_allocation PASSED [ 71%]
-tests/test_normalizer.py::TestNormalizer::test_normalize_holdings_and_top_movers_with_rupee_attribution PASSED [ 76%]
-tests/test_normalizer.py::TestNormalizer::test_normalize_sips_with_liquidity_coverage PASSED [ 80%]
-tests/test_normalizer.py::TestNormalizer::test_normalize_summary_standard PASSED [ 85%]
-tests/test_normalizer.py::TestNormalizer::test_normalize_summary_strings_with_commas PASSED [ 90%]
-tests/test_normalizer.py::TestNormalizer::test_normalize_with_markdown_fences_and_string_json PASSED [ 95%]
-tests/test_normalizer.py::TestNormalizer::test_update_sparkline_ring_buffer PASSED [100%]
-
-=================================== FAILURES ===================================
-_________ TestNormalizer.test_build_normalized_state_unchanged_streak __________
-AssertionError: 'US_OPEN' != 'IN_OPEN'
-- US_OPEN
-+ IN_OPEN
-
-__ TestNormalizer.test_build_normalized_state_window_transition_resets_streak __
-AssertionError: 'US_OPEN' != 'IN_OPEN'
-- US_OPEN
-+ IN_OPEN
-=========================== short test summary info ============================
-FAILED tests/test_normalizer.py::TestNormalizer::test_build_normalized_state_unchanged_streak
-FAILED tests/test_normalizer.py::TestNormalizer::test_build_normalized_state_window_transition_resets_streak
-========================= 2 failed, 19 passed in 0.06s =========================
+============================== 42 passed in 0.32s ==============================
 ```
-
-**Root Cause Analysis:**
-`build_normalized_state()` calls `get_market_state(unchanged_streak=unchanged_streak)` on line 521 of `normalizer.py`. The tests only patched `indmoney_sync.normalizer.get_nominal_market_state`, but `get_market_state` evaluates real system clock time (`datetime.datetime.now(IST)`). When tests run during US trading hours (20:48 IST), `get_market_state` returns `"US_OPEN"` instead of `"IN_OPEN"`, causing assertion failures due to unmocked clock state.
+- All unit tests across `test_cli.py`, `test_client.py`, `test_config.py`, `test_governor.py`, and `test_normalizer.py` pass cleanly.
+- Market clock mocking in normalizer tests accurately handles timezone and trading window transitions.

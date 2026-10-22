@@ -20,6 +20,7 @@ from .auth import (
     save_sips_cache_to_keyring,
 )
 from .client import IndMoneyMcpClient
+from .config import load_config
 from .governor import get_market_state, should_fetch
 from .inspector import run_inspect
 from .mock_data import get_mock_state
@@ -47,18 +48,24 @@ def ensure_dirs() -> None:
         shutil.rmtree(LEGACY_CACHE_DIR, ignore_errors=True)
 
 
+def _write_private_json(path: Path, data: Any, indent: int | None = None) -> None:
+    """Atomically writes JSON with 0o600 permissions using a temporary file in the same directory."""
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(str(tmp_path), flags, 0o600)
+    with open(fd, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=indent)
+    os.replace(tmp_path, path)
+
+
 def write_atomic_state(payload: dict[str, Any]) -> None:
     """
-    Atomically writes state JSON to RAM tmpfs.
+    Atomically writes state JSON to RAM tmpfs with 0o600 private permissions.
     Backs up the state securely into encrypted OS Keyring (libsecret).
     Zero plaintext balance data is ever saved to persistent disk.
     """
     ensure_dirs()
-    # Write to tmpfs tmp file first
-    with open(STATE_TMP_FILE, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
-    # Atomic replace in tmpfs
-    os.replace(STATE_TMP_FILE, STATE_FILE)
+    _write_private_json(STATE_FILE, payload, indent=2)
 
     # Persist backup securely into encrypted OS Keyring (zero disk leaks)
     if payload.get("status") in ("ok", "partial"):
@@ -173,7 +180,8 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     if not prev_state:
         prev_state = load_cached_state_from_keyring()
 
-    should_run, reason, market_state = should_fetch(state=prev_state, force=force)
+    cfg = load_config()
+    should_run, reason, market_state = should_fetch(state=prev_state, force=force, config=cfg)
     if verbose:
         print(f"[indmoney-sync] Governor check: should_run={should_run} ({reason}), market={market_state}")
 
@@ -304,8 +312,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
 
                 # Save sips to tmpfs and keyring
                 try:
-                    with open(SIPS_CACHE_FILE, "w", encoding="utf-8") as f:
-                        json.dump(sips_cached, f)
+                    _write_private_json(SIPS_CACHE_FILE, sips_cached)
                     save_sips_cache_to_keyring(sips_cached)
                 except Exception:
                     pass
@@ -343,6 +350,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
                 prev_state=prev_state,
                 status=sync_status,
                 failed_sources=failed_sources,
+                config=cfg,
             )
 
             write_atomic_state(state)

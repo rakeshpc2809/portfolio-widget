@@ -107,13 +107,14 @@
         ],
         "properties": {
           "bucket_id": {
-            "type": "string",
-            "enum": ["core", "satellite", "gold_silver", "liquid", "legacy"]
+            "type": "string"
           },
           "label": { "type": "string" },
           "current_value_inr": { "type": "number", "minimum": 0 },
           "actual_pct": { "type": "number", "minimum": 0, "maximum": 100 },
           "target_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+          "band_pct": { "type": "number", "minimum": 0 },
+          "rebalance_inr": { "type": "number" },
           "drift_pct": { "type": "number" },
           "in_band": { "type": "boolean" },
           "palette_key": {
@@ -181,7 +182,7 @@
           },
           "bucket_id": {
             "type": "string",
-            "enum": ["core", "satellite", "gold_silver", "liquid", "legacy"]
+            "minLength": 1
           },
           "current_value_inr": { "type": "number", "minimum": 0 },
           "invested_value_inr": { "type": "number", "minimum": 0 },
@@ -242,7 +243,9 @@
         "required": ["date", "v"],
         "properties": {
           "date": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
-          "v": { "type": "number", "minimum": 0 }
+          "v": { "type": "number", "minimum": 0 },
+          "return_pct": { "type": "number" },
+          "wealth_index": { "type": "number", "minimum": 0 }
         }
       }
     },

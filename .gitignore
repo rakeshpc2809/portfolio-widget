@@ -60,3 +60,7 @@ state.json
 *~
 .DS_Store
 artifacts/
+
+# Repomix outputs
+repomix-output.*
+repomix-output.xml

@@ -262,6 +262,9 @@ def execute_browser_auth_flow() -> dict[str, Any]:
     if OAuthCallbackHandler.error:
         raise RuntimeError(f"OAuth error: {OAuthCallbackHandler.error}")
 
+    if OAuthCallbackHandler.state != expected_state:
+        raise RuntimeError("OAuth state mismatch (potential CSRF attack). Aborting.")
+
     auth_code = OAuthCallbackHandler.auth_code
     if not auth_code:
         raise RuntimeError("No authorization code received.")

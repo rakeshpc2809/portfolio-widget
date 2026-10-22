@@ -23,11 +23,8 @@ Item {
 
     readonly property real d: IrisStyle.density
     readonly property real investedVal: IndMoneyService.investedValue
-    readonly property real dayPct: IndMoneyService.oneDayChangePct
-    readonly property bool isGain: dayPct >= 0
-    readonly property bool showDayPct: root.lane && ((hoverHandler.hovered || root.hovered) || !IndMoneyService.quietMode)
 
-    // Attention / Status alert states (M6: calm status, no infinite loop at rest)
+    // Calm Status Indicator: only visible when something needs attention or is actively syncing
     readonly property bool hasAttention: IndMoneyService.attentionItems.length > 0
     readonly property bool isPartial: IndMoneyService.status === "partial"
     readonly property bool isStale: IndMoneyService.freshness === "stale"
@@ -37,13 +34,12 @@ Item {
 
     readonly property color statusDotColor: {
         if (root.isAuthReq) return IrisStyle.identity.red
-        if (root.isPartial) return IrisStyle.identity.orange
-        if (root.hasAttention || root.isStale) return IrisStyle.identity.yellow
+        if (root.isPartial || root.hasAttention) return IrisStyle.identity.orange
+        if (root.isStale) return IrisStyle.identity.yellow
         if (root.isSyncing) return IrisStyle.identity.sky
         return IrisStyle.identity.teal
     }
 
-    // Fit seamlessly into iRiS Island bar geometry
     implicitWidth: root.lane
         ? Math.max(contentRow.implicitWidth + Math.round(12 * root.d), Math.round(36 * root.d))
         : Math.round(28 * root.d)
@@ -54,7 +50,6 @@ Item {
         anchors.centerIn: parent
         spacing: Math.round(5 * root.d)
 
-        // Native iRiS Material Symbol Glyph
         MaterialSymbol {
             text: "account_balance_wallet"
             iconSize: Math.round(15 * root.d)
@@ -71,7 +66,6 @@ Item {
             }
         }
 
-        // Networth Amount: slot-rolling IrisNumber with zero-leak opacity crossfade (M2, M8, V5)
         Item {
             id: amountContainer
             visible: root.lane
@@ -79,7 +73,6 @@ Item {
             implicitHeight: Math.max(liveNumber.implicitHeight, maskText.implicitHeight)
             Layout.alignment: Qt.AlignVCenter
 
-            // Live rolling figures (M2)
             IrisNumber {
                 id: liveNumber
                 anchors.centerIn: parent
@@ -99,7 +92,6 @@ Item {
                 }
             }
 
-            // Fixed-length mask (V5) - zero digit leak, opacity crossfade (M8)
             IrisText {
                 id: maskText
                 anchors.centerIn: parent
@@ -121,35 +113,6 @@ Item {
             }
         }
 
-        // 1D Return Chip (F3: hidden at rest in quietMode, smoothly revealed on hover)
-        Item {
-            id: dayChipContainer
-            implicitWidth: dayText.implicitWidth
-            implicitHeight: dayText.implicitHeight
-            Layout.alignment: Qt.AlignVCenter
-            opacity: root.showDayPct ? 1.0 : 0.0
-            visible: root.lane && opacity > 0.01
-
-            Behavior on opacity {
-                NumberAnimation {
-                    duration: IrisStyle.duration(140)
-                    easing.type: IrisStyle.feedbackEasing
-                }
-            }
-
-            IrisText {
-                id: dayText
-                anchors.centerIn: parent
-                text: IndMoneyService.formatPct(root.dayPct)
-                font.family: IrisStyle.fontNumbers
-                font.pixelSize: Math.round(10 * root.d)
-                font.weight: IrisStyle.weight(Font.Medium)
-                font.features: ({ "tnum": 1 })
-                color: root.isGain ? IrisStyle.identity.green : IrisStyle.identity.red
-            }
-        }
-
-        // Calm Alert / Sync Indicator Dot (M6: calm status, no infinite loop at rest)
         Rectangle {
             id: statusDot
             implicitWidth: Math.round(5 * root.d)
@@ -159,7 +122,6 @@ Item {
             visible: root.showStatusDot
             color: root.statusDotColor
 
-            // Gentle pulse ONLY during active network sync, zero pulsing at rest
             SequentialAnimation on opacity {
                 running: root.isSyncing && root.visible
                 loops: Animation.Infinite
