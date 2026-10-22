@@ -348,9 +348,16 @@ if card_file.exists():
     print("  -> Patched IrisCardContent.qml (marker-based)")
 EOF
 
-# 7. Generate Initial Mock State
+# 7. Generate Initial State (prioritize active keyring session / live fetch over mock)
 echo "[6/6] Populating initial state..."
-"$HOME/.local/bin/indmoney-sync" mock
+if "$HOME/.local/bin/indmoney-sync" hydrate 2>/dev/null && [ -s "/run/user/$(id -u)/inir-indmoney/state.json" ]; then
+    echo "  -> Restored existing portfolio state from keyring."
+elif "$HOME/.local/bin/indmoney-sync" fetch --force 2>/dev/null; then
+    echo "  -> Fetched live portfolio state from IndMoney."
+else
+    echo "  -> Initializing default mock state..."
+    "$HOME/.local/bin/indmoney-sync" mock
+fi
 
 # 8. Reload quickshell if running
 if command -v quickshell &>/dev/null && pgrep -x qs &>/dev/null; then

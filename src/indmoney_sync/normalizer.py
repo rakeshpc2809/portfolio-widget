@@ -420,7 +420,7 @@ def classify_holding(
 
     if ov_class:
         class_id = ov_class.lower()
-    elif "US" in raw_type_up or "NASDAQ" in raw_type_up or "VOO" in symbol:
+    elif "US" in raw_type_up or "NASDAQ" in raw_type_up or "VOO" in symbol or any(k in name_low for k in ("nasdaq", "s&p 500", "sp500", "us tech", "fang")):
         class_id = "us_eq"
     elif "GOLD" in raw_type_up or "SILVER" in raw_type_up or "SGB" in raw_type_up or "gold" in name_low or "silver" in name_low:
         class_id = "gold"
@@ -447,7 +447,7 @@ def classify_holding(
         bucket_id = "liquid"
     elif class_id == "gold" or any(k in name_low for k in ("gold", "silver", "sgb")):
         bucket_id = "gold_silver"
-    elif "large & mid" in name_low or "large and mid" in name_low:
+    elif any(k in name_low for k in ("large & mid", "large and mid", "large mid", "largemid", "large-mid")):
         bucket_id = "core"
     # Check Satellite / Factor / Sectoral BEFORE generic "index" so factor index funds don't leak into Core
     elif (
